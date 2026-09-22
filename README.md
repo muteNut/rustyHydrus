@@ -30,7 +30,7 @@ them to a release when you push a `v*` tag).
 |---|---|
 | Richards equation, Picard iteration, time-step control, all BC switching logic (atmospheric with/without surface layer, constant/variable head & flux, free drainage, seepage face, GWL-flux, 5 drain types) | ✔ ported and compared to Fortran |
 | Hydraulic models: van Genuchten, modified VG, Brooks–Corey, VG with air entry, Kosugi, Durner; property look-up tables | ✔ |
-| Hysteresis: Kool–Parker style scanning curves (iHyst 1 and 2) | ✔ (option 1 compared; option 2 ported) |
+Hysteresis: Kool–Parker style scanning curves (iHyst 1 and 2); Lenhard air-entrapment hysteresis (iHyst 3) | ✔ (Kool–Parker option 1 compared to Fortran; option 2 and Lenhard iHyst 3 ported but not yet cross-validated) |
 | Root water uptake (Feddes, S-shaped, compensated uptake, root growth, solute stress) | ✔ |
 | Solute transport: Galerkin / upstream weighting, non-linear sorption, decay chains, gas phase, two-site and mobile-immobile non-equilibrium, mass-balance | ✔ compared to Fortran |
 | Heat transport (conduction, convection, sinusoidal / atmospheric top temperature) | ✔ compared to Fortran |
