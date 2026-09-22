@@ -1,0 +1,13 @@
+[package]
+name = "hydrus-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hydrus1d-cli"
+path = "src/main.rs"
+
+[dependencies]
+hydrus-core = { path = "../hydrus-core" }
+hydrus-io = { path = "../hydrus-io" }

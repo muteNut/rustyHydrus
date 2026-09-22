@@ -1,0 +1,53 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev
+      - name: Test engine
+        run: cargo test -p hydrus-core --release
+      - name: Build release binaries
+        run: cargo build --release -p hydrus-gui -p hydrus-cli
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir dist && cp target/release/hydrus1d target/release/hydrus1d-cli dist/
+          tar czf hydrus1d-linux-x86_64.tar.gz -C dist .
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          mkdir dist
+          copy target\release\hydrus1d.exe dist\
+          copy target\release\hydrus1d-cli.exe dist\
+          Compress-Archive -Path dist\* -DestinationPath hydrus1d-windows-x86_64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hydrus1d-${{ runner.os }}
+          path: |
+            hydrus1d-linux-x86_64.tar.gz
+            hydrus1d-windows-x86_64.zip
+          if-no-files-found: ignore
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            hydrus1d-linux-x86_64.tar.gz
+            hydrus1d-windows-x86_64.zip

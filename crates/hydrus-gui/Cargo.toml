@@ -1,0 +1,18 @@
+[package]
+name = "hydrus-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hydrus1d"
+path = "src/main.rs"
+
+[dependencies]
+hydrus-core = { path = "../hydrus-core" }
+hydrus-io = { path = "../hydrus-io" }
+serde_json.workspace = true
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+egui = "0.31"
+egui_plot = "0.31"
+egui_extras = { version = "0.31", default-features = false }
