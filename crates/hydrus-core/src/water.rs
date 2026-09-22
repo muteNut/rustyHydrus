@@ -415,9 +415,13 @@ impl Simulation {
                 self.h_temp[n - 1] = hh;
             }
             loop {
-                self.set_mat(self.iter_w);
-                if self.iter_w == 2 && self.i_hyst > 0 {
-                    self.hyster_kp();
+                if self.i_hyst == 3 {
+                    self.lenhard_hyst(0, 2, crate::lenhard::ThetaTarget::Eq);
+                } else {
+                    self.set_mat(self.iter_w);
+                    if self.iter_w == 2 && self.i_hyst > 0 {
+                        self.hyster_kp();
+                    }
                 }
                 let sys = self.build_system();
                 self.shift();
@@ -490,6 +494,9 @@ impl Simulation {
             if self.w_layer && self.h_new[n - 1] > self.h_crit_s {
                 self.kod_top = 4;
                 self.h_top = self.h_crit_s;
+            }
+            if self.i_hyst == 3 {
+                self.lenhard_hyst(0, 3, crate::lenhard::ThetaTarget::New);
             }
             return;
         }

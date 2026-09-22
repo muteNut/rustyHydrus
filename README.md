@@ -35,7 +35,7 @@ Hysteresis: Kool–Parker style scanning curves (iHyst 1 and 2); Lenhard air-ent
 | Solute transport: Galerkin / upstream weighting, non-linear sorption, decay chains, gas phase, two-site and mobile-immobile non-equilibrium, mass-balance | ✔ compared to Fortran |
 | Heat transport (conduction, convection, sinusoidal / atmospheric top temperature) | ✔ compared to Fortran |
 | Legacy import (Selector.in v3/v4, Profile.dat, Atmosph.in) | ✔ |
-| **Not ported yet** | Lenhard hysteresis (iHyst 3), vapor flow, Meteo/Penman–Monteith BC, snow, interception/LAI, dual-porosity & dual-permeability, virus/colloid/filtration, temperature- and moisture-dependent reaction rates, active root solute uptake, inverse module, legacy *writer* |
+| **Not ported yet** | vapor flow, Meteo/Penman–Monteith BC, snow, interception/LAI, dual-porosity & dual-permeability, virus/colloid/filtration, temperature- and moisture-dependent reaction rates, active root solute uptake, inverse module, legacy *writer*, `Hysteresis.in`/`Options.in`/`MoistDep.in` reading |
 
 Unsupported options in an imported project produce a clear error instead of silently different results.
 

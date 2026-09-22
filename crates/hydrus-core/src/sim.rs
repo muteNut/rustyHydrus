@@ -162,6 +162,9 @@ pub struct Simulation {
     // sub-models
     pub heat: Option<HeatState>,
     pub sol: Option<SoluteState>,
+    // Bob Lenhard air-entrapment hysteresis (iHyst = 3)
+    pub lenhard_i_hyst: i32,
+    pub lenhard: Option<crate::lenhard::LenhardState>,
 }
 
 impl Simulation {
@@ -174,9 +177,7 @@ impl Simulation {
         let n_mat = prj.water.materials.len();
         let model = prj.water.model;
         let i_hyst = prj.water.hysteresis.code();
-        if i_hyst == 3 {
-            return Err(HydrusError::Unsupported("Lenhard hysteresis (option 3) is not yet ported".into()));
-        }
+
         let x_conv = prj.units.x_conv();
         let t_conv = prj.units.t_conv();
         let bc = prj.water.bc.clone();
@@ -459,6 +460,8 @@ impl Simulation {
             l_end: false,
             done: false,
             failed: false,
+            lenhard_i_hyst: 0,
+            lenhard: None,
             heat: None,
             sol: None,
             res: Results { n_solutes: ns, ..Default::default() },
@@ -477,9 +480,15 @@ impl Simulation {
         self.h_top = self.h_new[self.n - 1];
         self.h_bot = self.h_new[0];
         // initial hydraulic properties
-        self.set_mat(0);
-        self.th_old = self.th_eq.clone();
-        self.th_new = self.th_eq.clone();
+        if self.i_hyst == 3 {
+            let ik = self.prj.water.init_kappa;
+            self.lenhard_hyst(ik, 1, crate::lenhard::ThetaTarget::Old);
+            self.th_new = self.th_old.clone();
+        } else {
+            self.set_mat(0);
+            self.th_old = self.th_eq.clone();
+            self.th_new = self.th_eq.clone();
+        }
 
         if self.l_temp {
             self.heat_init()?;

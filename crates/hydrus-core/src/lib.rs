@@ -6,6 +6,7 @@ pub mod atm;
 pub mod error;
 pub mod examples;
 pub mod heat;
+pub mod lenhard;
 pub mod material;
 pub mod model;
 pub mod output;
