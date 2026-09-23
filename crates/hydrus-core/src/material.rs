@@ -36,6 +36,18 @@ pub fn par_of(m: &SoilMaterial, model: SoilModel, x_conv: f64) -> Par {
             p[7] = m.extra[1];
             p[8] = m.extra[2];
         }
+		SoilModel::DualPorosityW => {
+            p[6] = m.extra[0]; // thr_im
+            p[7] = m.extra[1]; // ths_im
+            p[8] = m.extra[2]; // Omega
+        }
+        SoilModel::DualPorosityH => {
+            p[6] = m.extra[0]; // thr_im
+            p[7] = m.extra[1]; // ths_im
+            p[8] = m.extra[2]; // Alfa_im
+            p[9] = m.extra[3]; // n_im
+            p[10] = m.extra[4]; // Omega
+        }
         _ => {}
     }
     p
@@ -81,7 +93,7 @@ pub fn fk(model: SoilModel, h: f64, p: &Par) -> f64 {
     let n = p[3];
     let bpar = p[5];
     match model {
-        SoilModel::VanGenuchten | SoilModel::ModifiedVG | SoilModel::VGAirEntry => {
+        SoilModel::VanGenuchten | SoilModel::ModifiedVG | SoilModel::VGAirEntry | SoilModel::DualPorosityW | SoilModel::DualPorosityH => {
             let (qm, qa, qk, kk, qs, ks) = vg_terms(model, p);
             let ppar = 2.0;
             let m = 1.0 - 1.0 / n;
@@ -165,7 +177,7 @@ pub fn fk(model: SoilModel, h: f64, p: &Par) -> f64 {
 pub fn fc(model: SoilModel, h: f64, p: &Par) -> f64 {
     let (qr, qs, alfa, n) = (p[0], p[1], p[2], p[3]);
     match model {
-        SoilModel::VanGenuchten | SoilModel::ModifiedVG | SoilModel::VGAirEntry => {
+        SoilModel::VanGenuchten | SoilModel::ModifiedVG | SoilModel::VGAirEntry | SoilModel::DualPorosityW | SoilModel::DualPorosityH => {
             let (qm, qa, _qk, _kk, _qs, _ks) = vg_terms(model, p);
             let m = 1.0 - 1.0 / n;
             let hh = h.max(hmin(alfa, n));
@@ -215,7 +227,7 @@ pub fn fc(model: SoilModel, h: f64, p: &Par) -> f64 {
 pub fn fq(model: SoilModel, h: f64, p: &Par) -> f64 {
     let (qr, qs, alfa, n) = (p[0], p[1], p[2], p[3]);
     match model {
-        SoilModel::VanGenuchten | SoilModel::ModifiedVG | SoilModel::VGAirEntry => {
+        SoilModel::VanGenuchten | SoilModel::ModifiedVG | SoilModel::VGAirEntry | SoilModel::DualPorosityW | SoilModel::DualPorosityH => {
             let (qm, qa, ..) = vg_terms(model, p);
             let m = 1.0 - 1.0 / n;
             let hh = h.max(hmin(alfa, n));
@@ -262,7 +274,7 @@ pub fn fq(model: SoilModel, h: f64, p: &Par) -> f64 {
 pub fn fs(model: SoilModel, h: f64, p: &Par) -> f64 {
     let (qr, qs, alfa, n) = (p[0], p[1], p[2], p[3]);
     match model {
-        SoilModel::VanGenuchten | SoilModel::ModifiedVG | SoilModel::VGAirEntry => {
+        SoilModel::VanGenuchten | SoilModel::ModifiedVG | SoilModel::VGAirEntry | SoilModel::DualPorosityW | SoilModel::DualPorosityH => {
             let (qm, qa, ..) = vg_terms(model, p);
             let m = 1.0 - 1.0 / n;
             let qees = ((qs - qa) / (qm - qa)).min(EPS1);
@@ -300,7 +312,7 @@ pub fn fs(model: SoilModel, h: f64, p: &Par) -> f64 {
 pub fn fh(model: SoilModel, qe: f64, p: &Par) -> f64 {
     let (_qr, qs, alfa, n) = (p[0], p[1], p[2], p[3]);
     match model {
-        SoilModel::VanGenuchten | SoilModel::ModifiedVG | SoilModel::VGAirEntry => {
+        SoilModel::VanGenuchten | SoilModel::ModifiedVG | SoilModel::VGAirEntry | SoilModel::DualPorosityW | SoilModel::DualPorosityH => {
             let (qm, qa, ..) = vg_terms(model, p);
             let m = 1.0 - 1.0 / n;
             let hm = hmin(alfa, n);

@@ -85,6 +85,15 @@ pub struct Simulation {
     pub ak_s: Vec<f64>,
     pub v_old: Vec<f64>,
     pub v_new: Vec<f64>,
+	// Vapor transport state
+	pub l_vapor: bool,
+    pub con_lt: Vec<f64>,
+    pub con_vt: Vec<f64>,
+    pub con_vh: Vec<f64>,
+    pub th_v_new: Vec<f64>,
+    pub th_v_old: Vec<f64>,
+    pub v_v_new: Vec<f64>,
+    pub v_v_old: Vec<f64>,
     // boundary conditions
     pub kod_top: i32,
     pub kod_bot: i32,
@@ -146,6 +155,8 @@ pub struct Simulation {
     pub r_root_d: f64,
     pub r_soil_d: f64,
     pub prec_d: f64,
+	pub snow_layer: f64,
+    pub interc_state: crate::meteo::InterceptionState,
     // cumulative water quantities
     pub cum_q: [f64; 12],
     pub w_cum_t: f64,
@@ -160,6 +171,12 @@ pub struct Simulation {
     pub l_end: bool,
     pub done: bool,
     pub failed: bool,
+	// Dual porosity state
+    pub i_dual_por: i32,
+    pub th_new_im: Vec<f64>,
+    pub th_old_im: Vec<f64>,
+    pub sink_im: Vec<f64>,
+    pub w_transf: f64,
     // sub-models
     pub heat: Option<HeatState>,
     pub sol: Option<SoluteState>,
@@ -322,6 +339,18 @@ impl Simulation {
         let const_flux_read = (!bc.top_time_variable && bc.kod_top == -1)
             || (!bc.bot_time_variable && bc.kod_bot == -1 && !bc.gwl_flux && !bc.free_drainage && !bc.seepage_face && bc.drains.is_none());
         let (r_top, r_bot, r_root) = if const_flux_read { (bc.r_top, bc.r_bot, bc.r_root.abs()) } else { (0.0, 0.0, 0.0) };
+		
+		let i_dual_por = match model {
+			SoilModel::DualPorosityW => 1,
+			SoilModel::DualPorosityH => 2,
+			_ => 0,
+		};
+		// Initialize th_old_im and th_new_im with ths_im (par_d[m][7]) or initial condition
+		let mut th_init_im = vec![0.0; n];
+		for i in 0..n {
+			let m = mat[i];
+			th_init_im[i] = par_d[m][7]; // default to ths_im
+		}
 
         let tm = &prj.time;
         let mut t_print = tm.print_times.clone();
@@ -445,10 +474,12 @@ impl Simulation {
             dt_max_c: 1e30,
             dt_max_t: 1e30,
             atm_idx: 0,
-			meteo_idx: 0,
+            meteo_idx: 0,
             r_root_d: 0.0,
             r_soil_d: 0.0,
             prec_d: 0.0,
+            snow_layer: 0.0,
+            interc_state: crate::meteo::InterceptionState::default(),
             cum_q: [0.0; 12],
             w_cum_t: 0.0,
             w_cum_a: 0.0,
@@ -464,6 +495,19 @@ impl Simulation {
             failed: false,
             lenhard_i_hyst: 0,
             lenhard: None,
+            l_vapor: prj.processes.vapor,
+            con_lt: vec![0.0; n],
+            con_vt: vec![0.0; n],
+            con_vh: vec![0.0; n],
+            th_v_new: vec![0.0; n],
+            th_v_old: vec![0.0; n],
+            v_v_new: vec![0.0; n],
+            v_v_old: vec![0.0; n],
+			i_dual_por,
+			th_new_im: th_init_im.clone(),
+			th_old_im: th_init_im,
+			sink_im: vec![0.0; n],
+			w_transf: 0.0,
             heat: None,
             sol: None,
             res: Results { n_solutes: ns, ..Default::default() },
@@ -481,7 +525,8 @@ impl Simulation {
         // hTop / hBot come from the initial condition at the boundary nodes
         self.h_top = self.h_new[self.n - 1];
         self.h_bot = self.h_new[0];
-        // initial hydraulic properties
+
+        // Initial hydraulic properties
         if self.i_hyst == 3 {
             let ik = self.prj.water.init_kappa;
             self.lenhard_hyst(ik, 1, crate::lenhard::ThetaTarget::Old);
@@ -498,13 +543,16 @@ impl Simulation {
         if self.l_chem {
             self.solute_init()?;
         }
-        // atmospheric information
+
+        // Atmospheric information
         if self.top_inf || self.bot_inf || self.atm_bc {
             self.atm_idx = 0;
-			self.meteo_idx = 0;
+            self.meteo_idx = 0;
+            self.snow_layer = 0.0;
+            self.interc_state = crate::meteo::InterceptionState::default();
             self.t_atm2 = self.t_max;
             self.set_bc()?;
-			let mut next_atm_time = self.t_atm1.min(self.t_atm2);
+            let mut next_atm_time = self.t_atm1.min(self.t_atm2);
             if let Some(ref mp) = self.prj.atmosphere.meteo {
                 if self.meteo_idx < mp.records.len() {
                     let t_meteo = mp.records[self.meteo_idx].t;
@@ -527,27 +575,121 @@ impl Simulation {
                 self.t_atm_old = self.t_init;
                 self.sin_prec();
             }
-            if self.kod_top == -4 {
+            // Evaluate snowpack and canopy interception on initial boundary ingestion
+            self.apply_snow_and_interception();
+            if self.kod_top == -4 || !self.l_var_bc {
                 self.r_top = self.r_soil.abs() - self.prec.abs();
             }
         }
+
         if self.l_root {
             self.set_rg();
         }
         if self.sink_f {
             self.set_snk();
         }
-        // initial output
+
+        // Initial output
         self.profile_out(self.t_init);
         self.sub_reg(0);
-        if self.l_chem || self.l_temp {
+        if self.l_chem || self.l_temp || self.l_vapor {
             let (ho, thn) = (self.h_old.clone(), self.th_old.clone());
-            let v = self.veloc(&ho, &thn, &thn);
+            let temps: Vec<f64> = (0..self.n).map(|i| self.temp(i)).collect();
+            let (v, vv) = self.veloc(&ho, &thn, &thn, &temps);
             self.v_old = v;
+            self.v_v_old = vv;
         }
         self.v_new = self.v_old.clone();
+        self.v_v_new = self.v_v_old.clone();
         self.th_new = self.th_old.clone();
         Ok(())
+    }
+
+    /// Evaluates dynamic snow accumulation/melt and canopy interception/LAI partitioning.
+    pub fn apply_snow_and_interception(&mut self) {
+        if !self.prj.atmosphere.snow && !self.prj.atmosphere.interception && !self.prj.atmosphere.lai_partitioning {
+            return;
+        }
+
+        let temp_air = if let Some(ref mp) = self.prj.atmosphere.meteo {
+            if self.meteo_idx < mp.records.len() {
+                let r = &mp.records[self.meteo_idx];
+                (r.t_max + r.t_min) / 2.0
+            } else {
+                0.0
+            }
+        } else if self.atm_idx < self.prj.atmosphere.records.len() {
+            self.prj.atmosphere.records[self.atm_idx].t_top
+        } else {
+            0.0
+        };
+
+        // 1. Snow accumulation and melt
+        if self.prj.atmosphere.snow {
+            let mut c_top_dummy = vec![0.0; self.n_species()];
+            let c_t_dummy = vec![0.0; self.n_species()];
+
+            let (p_eff, s_pack, evap_eff, min_step) = crate::meteo::calculate_snow(
+                self.prec,
+                temp_air,
+                self.dt,
+                self.prj.atmosphere.snow_mf,
+                self.snow_layer,
+                self.r_soil,
+                self.x_conv,
+                &mut c_top_dummy,
+                &c_t_dummy,
+            );
+
+            self.prec = p_eff;
+            self.snow_layer = s_pack;
+            self.r_soil = evap_eff;
+            if min_step {
+                self.min_step = true;
+            }
+        }
+
+        // 2. Canopy interception & LAI partitioning
+        if self.prj.atmosphere.lai_partitioning || self.prj.atmosphere.interception {
+            let lai = if let Some(ref mp) = self.prj.atmosphere.meteo {
+                if self.meteo_idx < mp.records.len() {
+                    mp.records[self.meteo_idx].lai.unwrap_or(mp.lai)
+                } else {
+                    mp.lai
+                }
+            } else {
+                0.0
+            };
+
+            let scf = (1.0 - (-self.prj.atmosphere.extinction.max(0.1) * lai).exp()).max(0.0);
+
+            if self.prj.atmosphere.lai_partitioning && lai > 0.0 {
+                let r_pet = self.r_soil;
+                self.r_root = r_pet * scf;
+                self.r_soil = r_pet - self.r_root;
+            }
+
+            if self.prj.atmosphere.interception {
+                let (net_p, net_tr, _act_int) = crate::meteo::calculate_interception(
+                    self.prec,
+                    self.r_root,
+                    lai,
+                    self.prj.atmosphere.interception_a,
+                    scf,
+                    &mut self.interc_state,
+                );
+                self.prec = net_p;
+                self.r_root = net_tr;
+            }
+        }
+
+        // Recompute net surface flux ONLY when an atmospheric BC is active.
+        // For non-atmospheric simulations (e.g. constant boundary flux), r_top must NOT be touched.
+        if self.atm_bc || self.top_inf {
+            if self.kod_top.abs() == 4 || !self.l_var_bc {
+                self.r_top = self.r_soil.abs() - self.prec.abs();
+            }
+        }
     }
 
     // ---------------------------------------------------------------- main loop
@@ -575,9 +717,13 @@ impl Simulation {
             self.iter_w = 1;
             self.it_cum += 1;
         }
-        if self.l_wat && (self.l_temp || self.l_chem) {
+
+        if self.l_wat && (self.l_temp || self.l_chem || self.l_vapor) {
             let (hn, thn, tho) = (self.h_new.clone(), self.th_new.clone(), self.th_old.clone());
-            self.v_new = self.veloc(&hn, &thn, &tho);
+            let temps: Vec<f64> = (0..self.n).map(|i| self.temp(i)).collect();
+            let (v, vv) = self.veloc(&hn, &thn, &tho, &temps);
+            self.v_new = v;
+            self.v_v_new = vv;
         }
         if self.l_root {
             self.set_rg();
@@ -615,6 +761,7 @@ impl Simulation {
             self.sub_reg(self.p_level + 1);
             self.p_level += 1;
         }
+
         // ---- A-level
         if (self.t - self.t_atm).abs() <= 0.001 * self.dt && (self.top_inf || self.bot_inf || self.atm_bc) {
             self.a_level();
@@ -647,6 +794,7 @@ impl Simulation {
             if self.prj.atmosphere.sinusoidal_precip {
                 self.prec_d = self.prec;
             }
+            self.apply_snow_and_interception();
             if !self.l_var_bc {
                 self.r_top = self.r_soil.abs() - self.prec.abs();
             }
@@ -654,6 +802,7 @@ impl Simulation {
         if self.l_chem {
             self.sol_wlayer_mix();
         }
+
         // ---- time governing
         if (self.t - self.t_max).abs() <= 0.5 * self.dt_min || self.t > self.t_max {
             self.done = true;
@@ -675,14 +824,26 @@ impl Simulation {
         let tp = if self.p_level < self.t_print.len() { self.t_print[self.p_level] } else { self.t_max };
         self.tm_cont(iter, tp.min(self.t_print1), dt_max_a);
         self.t += self.dt;
+
+        // Apply sub-daily variations (only modify r_top if atmospheric BC is enabled)
         if self.prj.atmosphere.daily_variation {
             self.daily_var_root_soil();
-            self.r_top = self.r_soil.abs() - self.prec.abs();
+            if self.atm_bc || self.top_inf {
+                self.r_top = self.r_soil.abs() - self.prec.abs();
+            }
         }
         if self.prj.atmosphere.sinusoidal_precip {
             self.sin_prec();
-            self.r_top = self.r_soil.abs() - self.prec.abs();
+            if self.atm_bc || self.top_inf {
+                self.r_top = self.r_soil.abs() - self.prec.abs();
+            }
         }
+
+        // Apply step-level snowpack melt/accumulation and interception before next step's wat_flow
+        if self.atm_bc || self.top_inf {
+            self.apply_snow_and_interception();
+        }
+
         self.t_level += 1;
         if self.t_level > 999_999 {
             self.t_level = 2;
@@ -718,6 +879,9 @@ impl Simulation {
         let i_bot = if self.kod_bot > 0 { 1 } else { 0 };
         let i_top = if self.kod_top > 0 { n - 2 } else { n - 1 };
         let mut l_sat = true;
+		if self.i_dual_por > 0 {
+			self.th_old_im.copy_from_slice(&self.th_new_im);
+		}
         if self.l_wat {
             for i in i_bot..=i_top {
                 if self.h_new[i] < 0.0 && self.h_old[i] < 0.0 {
@@ -753,6 +917,10 @@ impl Simulation {
             self.h_new[n - 1] = v;
             self.h_temp[n - 1] = v;
             self.h_old[n - 1] = v;
+        }
+        if self.l_vapor {
+            self.th_v_old.copy_from_slice(&self.th_v_new);
+            self.v_v_old.copy_from_slice(&self.v_v_new);
         }
     }
 

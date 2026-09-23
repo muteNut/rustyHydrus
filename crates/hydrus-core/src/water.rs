@@ -1,6 +1,7 @@
 //! Richards equation solver (port of WATFLOW.FOR).
 
 use crate::material::*;
+use crate::model::SoilModel;
 use crate::sim::Simulation;
 
 /// Tridiagonal system in the layout of the Fortran code.
@@ -143,6 +144,38 @@ impl Simulation {
                 self.con_o[i] = self.con[i];
             }
         }
+		if self.l_vapor || self.prj.water.l_w_dep {
+            let temps: Vec<f64> = (0..self.n).map(|i| self.temp(i)).collect();
+            crate::vapor::con_vapor(
+                self.n,
+                &self.mat,
+                &self.h_new,
+                &temps,
+                &self.con,
+                &self.th_eq,
+                &self.ths,
+                &mut self.con_lt,
+                &mut self.con_vt,
+                &mut self.con_vh,
+                self.x_conv,
+                self.t_conv,
+                self.l_vapor,
+                1,
+            );
+            if self.l_vapor {
+                crate::vapor::vapor_content(
+                    self.n,
+                    &self.mat,
+                    &self.th_eq,
+                    &mut self.th_v_new,
+                    &temps,
+                    &self.h_new,
+                    &self.ths,
+                    &mut self.cap,
+                    self.x_conv,
+                );
+            }
+        }
     }
 
     /// Kool & Parker style reversal detection and scanning-curve parameters (Hyster in WATFLOW.FOR).
@@ -202,43 +235,103 @@ impl Simulation {
     }
 
     /// Velocity at node i using the Fortran "Veloc" formula.
-    pub fn veloc(&self, h: &[f64], th_new: &[f64], th_old: &[f64]) -> Vec<f64> {
+    /// Velocity at node i using the Fortran "Veloc" formula.
+    pub fn veloc(
+        &self,
+        h: &[f64],
+        th_new: &[f64],
+        th_old: &[f64],
+        temp: &[f64],
+    ) -> (Vec<f64>, Vec<f64>) {
         let n = self.n;
         let x = &self.x;
         let con = &self.con;
         let g = self.cos_alf;
+        let dt = self.dt;
         let mut v = vec![0.0; n];
+        let mut v_v = vec![0.0; n];
+
+        // Top node (m = n - 1)
         let m = n - 1;
         let dxn = x[m] - x[m - 1];
         v[m] = -(con[m] + con[m - 1]) / 2.0 * ((h[m] - h[m - 1]) / dxn + g)
-            - dxn / 2.0 * ((th_new[m] - th_old[m]) / self.dt + self.sink[m]);
+            - dxn / 2.0 * ((th_new[m] - th_old[m]) / dt + self.sink[m]);
+
+        if self.prj.water.l_w_dep {
+            v[m] -= (self.con_lt[m] + self.con_lt[m - 1]) / 2.0 * (temp[m] - temp[m - 1]) / dxn;
+        }
+
+        if self.l_vapor {
+            v_v[m] = -(self.con_vh[m] + self.con_vh[m - 1]) / 2.0 * (h[m] - h[m - 1]) / dxn
+                - (self.con_vt[m] + self.con_vt[m - 1]) / 2.0 * (temp[m] - temp[m - 1]) / dxn
+                - dxn / 2.0 * (self.th_v_new[m] - self.th_v_old[m]) / dt;
+        }
+
+        // Interior nodes
         for i in 1..n - 1 {
             let dxa = x[i + 1] - x[i];
             let dxb = x[i] - x[i - 1];
+
             let va = -(con[i] + con[i + 1]) / 2.0 * ((h[i + 1] - h[i]) / dxa + g);
             let vb = -(con[i] + con[i - 1]) / 2.0 * ((h[i] - h[i - 1]) / dxb + g);
-            v[i] = (va * dxb + vb * dxa) / (dxa + dxb);
+            let mut vi = (va * dxb + vb * dxa) / (dxa + dxb);
+
+            if self.prj.water.l_w_dep {
+                let v_ta = -(self.con_lt[i] + self.con_lt[i + 1]) / 2.0 * (temp[i + 1] - temp[i]) / dxa;
+                let v_tb = -(self.con_lt[i] + self.con_lt[i - 1]) / 2.0 * (temp[i] - temp[i - 1]) / dxb;
+                vi += (v_ta * dxb + v_tb * dxa) / (dxa + dxb);
+            }
+            v[i] = vi;
+
+            if self.l_vapor {
+                let mut v_va = -(self.con_vh[i] + self.con_vh[i + 1]) / 2.0 * (h[i + 1] - h[i]) / dxa;
+                let mut v_vb = -(self.con_vh[i] + self.con_vh[i - 1]) / 2.0 * (h[i] - h[i - 1]) / dxb;
+                v_va -= (self.con_vt[i] + self.con_vt[i + 1]) / 2.0 * (temp[i + 1] - temp[i]) / dxa;
+                v_vb -= (self.con_vt[i] + self.con_vt[i - 1]) / 2.0 * (temp[i] - temp[i - 1]) / dxb;
+                v_v[i] = (v_va * dxb + v_vb * dxa) / (dxa + dxb);
+            }
         }
+
+        // Bottom node (i = 0)
         let dx1 = x[1] - x[0];
-        v[0] = -(con[0] + con[1]) / 2.0 * ((h[1] - h[0]) / dx1 + g) + dx1 / 2.0 * ((th_new[0] - th_old[0]) / self.dt + self.sink[0]);
-        v
+        v[0] = -(con[0] + con[1]) / 2.0 * ((h[1] - h[0]) / dx1 + g)
+            + dx1 / 2.0 * ((th_new[0] - th_old[0]) / dt + self.sink[0]);
+
+        if self.prj.water.l_w_dep {
+            v[0] -= (self.con_lt[0] + self.con_lt[1]) / 2.0 * (temp[1] - temp[0]) / dx1;
+        }
+
+        if self.l_vapor {
+            v_v[0] = -(self.con_vh[0] + self.con_vh[1]) / 2.0 * (h[1] - h[0]) / dx1
+                - (self.con_vt[0] + self.con_vt[1]) / 2.0 * (temp[1] - temp[0]) / dx1
+                + dx1 / 2.0 * (self.th_v_new[0] - self.th_v_old[0]) / dt;
+        }
+
+        (v, v_v)
     }
 
     fn build_system(&mut self) -> Sys {
         let n = self.n;
         let dt = self.dt;
         let grav = self.cos_alf;
+
         for i in 0..n {
             self.th_new[i] = self.th_old[i] + (self.th_eq[i] - self.th_old[i]);
         }
+
         let mut p = vec![0.0; n];
         let mut r = vec![0.0; n];
         let mut s = vec![0.0; n];
-        // bottom
+
+        // --- Bottom BC ---
         let dxb = self.x[1] - self.x[0];
         let dx = dxb / 2.0;
-        let conb = (self.con[0] + self.con[1]) / 2.0;
+        let mut conb = (self.con[0] + self.con[1]) / 2.0;
         let b = conb * grav;
+		
+        if self.l_vapor {
+            conb += (self.con_vh[0] + self.con_vh[1]) / 2.0;
+        }
         s[0] = -conb / dxb;
         if self.free_d {
             self.r_bot = -conb * grav;
@@ -252,31 +345,86 @@ impl Simulation {
         if let Some(d) = &self.prj.water.bc.drains {
             self.r_bot = d.flux(self.x[0] + self.h_new[0]);
         }
-        let pb = b - self.sink[0] * dx + f2 * self.h_new[0] - (self.th_new[0] - self.th_old[0]) * dx / dt + self.r_bot;
+        let mut pb = b - self.sink[0] * dx + f2 * self.h_new[0] - (self.th_new[0] - self.th_old[0]) * dx / dt + self.r_bot;
+		if self.i_dual_por > 0 {
+			pb -= self.sink_im[0] * dx;
+		}
+        if self.l_vapor || self.prj.water.l_w_dep {
+            let mut con_tb = 0.0;
+            if self.l_vapor {
+                con_tb += (self.con_vt[0] + self.con_vt[1]) / 2.0;
+            }
+            if self.prj.water.l_w_dep {
+                con_tb += (self.con_lt[0] + self.con_lt[1]) / 2.0;
+            }
+            pb += con_tb * (self.temp(1) - self.temp(0)) / dxb - (self.th_v_new[0] - self.th_v_old[0]) * dx / dt;
+        }
+
+        // --- Interior Nodes ---
         for i in 1..n - 1 {
             let dxa = self.x[i] - self.x[i - 1];
             let dxb = self.x[i + 1] - self.x[i];
             let dx = (dxa + dxb) / 2.0;
-            let cona = (self.con[i] + self.con[i - 1]) / 2.0;
-            let conb = (self.con[i] + self.con[i + 1]) / 2.0;
+            let mut cona = (self.con[i] + self.con[i - 1]) / 2.0;
+            let mut conb = (self.con[i] + self.con[i + 1]) / 2.0;
             let b = (cona - conb) * grav;
+			if self.i_dual_por > 0 {
+				p[i] -= self.sink_im[i] * dx;
+			}
+            if self.l_vapor {
+                cona += (self.con_vh[i] + self.con_vh[i - 1]) / 2.0;
+                conb += (self.con_vh[i] + self.con_vh[i + 1]) / 2.0;
+            }
             let a2 = cona / dxa + conb / dxb;
             let a3 = -conb / dxb;
             let f2 = self.cap[i] * dx / dt;
             r[i] = a2 + f2;
             p[i] = f2 * self.h_new[i] - (self.th_new[i] - self.th_old[i]) * dx / dt - b - self.sink[i] * dx;
             s[i] = a3;
+            if self.l_vapor || self.prj.water.l_w_dep {
+                let mut con_ta = 0.0;
+                let mut con_tb = 0.0;
+                if self.l_vapor {
+                    con_ta += (self.con_vt[i] + self.con_vt[i - 1]) / 2.0;
+                    con_tb += (self.con_vt[i] + self.con_vt[i + 1]) / 2.0;
+                }
+                if self.prj.water.l_w_dep {
+                    con_ta += (self.con_lt[i] + self.con_lt[i - 1]) / 2.0;
+                    con_tb += (self.con_lt[i] + self.con_lt[i + 1]) / 2.0;
+                }
+                p[i] += con_tb * (self.temp(i + 1) - self.temp(i)) / dxb
+                    - con_ta * (self.temp(i) - self.temp(i - 1)) / dxa
+                    - (self.th_v_new[i] - self.th_v_old[i]) * dx / dt;
+            }
         }
-        // top
+
+        // --- Top BC ---
         let m = n - 1;
         let dxa = self.x[m] - self.x[m - 1];
         let dx = dxa / 2.0;
-        let cona = (self.con[m] + self.con[m - 1]) / 2.0;
+        let mut cona = (self.con[m] + self.con[m - 1]) / 2.0;
         let b = cona * grav;
+		
+        if self.l_vapor {
+            cona += (self.con_vh[m] + self.con_vh[m - 1]) / 2.0;
+        }
         let f2 = self.cap[m] * dx / dt;
         let mut rt = cona / dxa + f2;
         let st = -cona / dxa;
         let mut pt = f2 * self.h_new[m] - (self.th_new[m] - self.th_old[m]) * dx / dt - self.sink[m] * dx - b;
+		if self.i_dual_por > 0 {
+            pt -= self.sink_im[m] * dx;
+        }
+        if self.l_vapor || self.prj.water.l_w_dep {
+            let mut con_ta = 0.0;
+            if self.l_vapor {
+                con_ta += (self.con_vt[m] + self.con_vt[m - 1]) / 2.0;
+            }
+            if self.prj.water.l_w_dep {
+                con_ta += (self.con_lt[m] + self.con_lt[m - 1]) / 2.0;
+            }
+            pt -= con_ta * (self.temp(m) - self.temp(m - 1)) / dxa + (self.th_v_new[m] - self.th_v_old[m]) * dx / dt;
+        }
         self.v_top = -st * self.h_new[m - 1] - rt * self.h_new[m] + pt;
         pt -= self.r_top;
         if self.w_layer {
@@ -285,6 +433,7 @@ impl Simulation {
             }
             pt += self.h_old[m].max(0.0) / dt;
         }
+
         Sys { p, r, s, pb, rb, sb, pt, rt, st }
     }
 
@@ -347,6 +496,7 @@ impl Simulation {
     fn shift(&mut self) {
         let n = self.n;
         let grav = self.cos_alf;
+		
         if self.seep_f {
             let dx = self.x[1] - self.x[0];
             let v_bot = -(self.con[0] + self.con[1]) / 2.0 * ((self.h_new[1] - self.h_new[0]) / dx + grav)
@@ -365,9 +515,21 @@ impl Simulation {
             if self.kod_top > 0 {
                 let m = n - 2;
                 let dx = self.x[n - 1] - self.x[m];
-                let v_top = -(self.con[n - 1] + self.con[m]) / 2.0 * ((self.h_new[n - 1] - self.h_new[m]) / dx + grav)
+                let mut v_top = -(self.con[n - 1] + self.con[m]) / 2.0 * ((self.h_new[n - 1] - self.h_new[m]) / dx + grav)
                     - (self.th_new[n - 1] - self.th_old[n - 1]) * dx / 2.0 / self.dt
                     - self.sink[n - 1] * dx / 2.0;
+
+                if self.i_dual_por > 0 {
+					v_top -= self.sink_im[n - 1] * dx / 2.0;
+				}
+				if self.prj.water.l_w_dep {
+                    v_top -= (self.con_lt[n - 1] + self.con_lt[m]) / 2.0 * (self.temp(n - 1) - self.temp(m)) / dx;
+                }
+                if self.l_vapor {
+                    v_top -= (self.con_vh[n - 1] + self.con_vh[m]) / 2.0 * (self.h_new[n - 1] - self.h_new[m]) / dx
+                        + (self.con_vt[n - 1] + self.con_vt[m]) / 2.0 * (self.temp(n - 1) - self.temp(m)) / dx;
+                }
+
                 if v_top.abs() > self.r_top.abs() || v_top * self.r_top <= 0.0 {
                     if self.kod_top.abs() == 4 {
                         self.kod_top = -4;
@@ -407,6 +569,9 @@ impl Simulation {
         'outer: loop {
             self.iter_w = 0;
             self.convg = true;
+			if self.i_dual_por > 0 {
+                self.dual_por();
+            }
             if self.w_layer && self.h_new[n - 1] > 0.0 && self.h_new[n - 1] < 0.00005 * self.x_conv && self.r_top >= 0.0 {
                 let m = self.mat[n - 1];
                 let hh = fh(self.model, 0.9999, &self.par_d[m]);
@@ -501,6 +666,149 @@ impl Simulation {
             return;
         }
     }
+	
+	/// Mass transfer between mobile and immobile water domains (DualPor in WATFLOW.FOR).
+    pub fn dual_por(&mut self) {
+        if self.i_dual_por == 0 {
+            return;
+        }
+        let n = self.n;
+        let dt = self.dt;
+        self.w_transf = 0.0;
+
+        for i in 0..n {
+            let m = self.mat[i];
+            let par = &self.par_d[m];
+            let thr_m = self.thr[m];
+            let ths_m = self.ths[m];
+            let thr_im = par[6];
+            let ths_im = par[7];
+
+            let se_im = ((self.th_old_im[i] - thr_im) / (ths_im - thr_im)).clamp(0.0, 1.0);
+
+            if self.i_dual_por == 1 {
+                // Water Content driven exchange (Model 6)
+                let se = ((self.th_old[i] - thr_m) / (ths_m - thr_m)).clamp(0.0, 1.0);
+                let omega = par[8];
+                self.sink_im[i] = omega * (se - se_im);
+
+                let delta_th = (se - se_im) / (ths_m - thr_m + ths_im - thr_im)
+                    * (ths_m - thr_m)
+                    * (ths_im - thr_im);
+
+                if self.sink_im[i] > 0.0 {
+                    let mut tr_max_im = (ths_im - self.th_old_im[i]) / dt;
+                    tr_max_im = tr_max_im.min(delta_th / dt);
+                    if self.sink_im[i] > tr_max_im {
+                        self.sink_im[i] = tr_max_im;
+                    }
+                } else if self.sink_im[i] < 0.0 {
+                    let mut tr_max_im = -(ths_m - self.th_old[i]) / dt;
+                    tr_max_im = tr_max_im.max(delta_th / dt);
+                    if self.sink_im[i] < tr_max_im {
+                        self.sink_im[i] = tr_max_im;
+                    }
+                }
+            } else if self.i_dual_por == 2 {
+                // Construct the matrix material parameters Par matching Fortran Par(1..6)
+                let par_im: Par = [
+                    par[6], // thr_im
+                    par[7], // ths_im
+                    par[8], // Alfa_im
+                    par[9], // n_im
+                    par[10], // Omega (used as Ks in the matrix retention/conductance)
+                    par[5], // l (same tortuosity/connectivity as fracture)
+                    0.0, 0.0, 0.0, 0.0, 0.0,
+                ];
+
+                // Immobile matrix head h_im from Se_im
+                let h_im = fh(SoilModel::VanGenuchten, se_im, &par_im);
+
+                // Immobile matrix conductivity and fracture conductivity evaluated with par_im
+                let cond_m = fk(SoilModel::VanGenuchten, h_im, &par_im);
+                let cond_f = fk(SoilModel::VanGenuchten, self.h_new[i], &par_im);
+
+                self.sink_im[i] = 0.5 * (cond_m + cond_f) * (self.h_new[i] - h_im);
+
+                // Near surface cutoff under strong evaporation
+                if i == n - 1
+                    && (self.h_crit_a - self.h_new[n - 1]).abs() < -0.001 * self.h_crit_a
+                    && (self.h_crit_a - h_im).abs() < -0.01 * self.h_crit_a
+                {
+                    self.sink_im[i] = 0.0;
+                }
+
+                // Bounds checking against matrix/fracture capacities
+                if self.sink_im[i] > 0.0 {
+                    let tr_max_im = (ths_im - self.th_old_im[i]) / dt;
+                    if self.sink_im[i] > tr_max_im {
+                        self.sink_im[i] = tr_max_im;
+                    }
+                } else if self.sink_im[i] < 0.0 {
+                    let tr_max_im = -(ths_m - self.th_old[i]) / dt;
+                    if self.sink_im[i] < tr_max_im {
+                        self.sink_im[i] = tr_max_im;
+                    }
+                }
+            }
+
+            self.th_new_im[i] = (self.th_old_im[i] + self.sink_im[i] * dt).clamp(thr_im, ths_im);
+
+            if i >= 1 {
+                self.w_transf += (self.sink_im[i - 1] + self.sink_im[i]) / 2.0 * (self.x[i] - self.x[i - 1]);
+            }
+        }
+    }
 
     fn it_cum_start(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Project;
+
+    #[test]
+    fn test_coupled_liquid_and_vapor_velocity() {
+        let mut prj = Project::default();
+        prj.processes.vapor = true;
+        prj.processes.heat = true;
+        
+        let mut sim = Simulation::new(prj).expect("Simulation should initialize");
+        
+        // Setup simple 3-node column: bottom = -10, mid = -5, top = 0
+        sim.n = 3;
+        sim.x = vec![-10.0, -5.0, 0.0];
+        sim.dt = 1.0;
+        sim.cos_alf = 1.0;
+        sim.sink = vec![0.0; 3];
+        sim.l_vapor = true;
+
+        let h = vec![-100.0, -90.0, -80.0];      // dh/dx = (-80 - -100)/10 = 2.0
+        let th_new = vec![0.25; 3];
+        let th_old = vec![0.25; 3];
+        let temp = vec![15.0, 20.0, 25.0];        // dT/dx = (25 - 15)/10 = 1.0
+
+        sim.con = vec![1.0; 3];                   // Liquid K = 1.0
+        sim.con_vh = vec![0.1; 3];                // Isothermal vapor K_vh = 0.1
+        sim.con_vt = vec![0.05; 3];               // Thermal vapor K_vT = 0.05
+        sim.th_v_new = vec![0.001; 3];
+        sim.th_v_old = vec![0.001; 3];
+
+        let (v_liq, v_vap) = sim.veloc(&h, &th_new, &th_old, &temp);
+
+        // 1. Liquid velocity at interior node: -K * (dh/dx + cos_alf)
+        // dx = 5.0, dh/dx = 10 / 5 = 2.0. With gravity = 1.0 -> -1.0 * (2.0 + 1.0) = -3.0
+        assert_eq!(v_liq.len(), 3);
+        assert!((v_liq[1] - (-3.0)).abs() < 1e-6);
+
+        // 2. Vapor velocity at interior node: -K_vh * (dh/dx) - K_vT * (dT/dx)
+        // -0.1 * 2.0 - 0.05 * 1.0 = -0.20 - 0.05 = -0.25
+        assert_eq!(v_vap.len(), 3);
+        assert!((v_vap[1] - (-0.25)).abs() < 1e-6);
+
+        // 3. Boundary nodes reflect matching gradient directions
+        assert!((v_vap[0] - (-0.25)).abs() < 1e-6);
+        assert!((v_vap[2] - (-0.25)).abs() < 1e-6);
+    }
 }

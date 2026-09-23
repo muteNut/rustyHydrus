@@ -16,6 +16,7 @@ pub mod root;
 pub mod sim;
 pub mod solute;
 pub mod water;
+pub mod vapor;
 
 pub use error::HydrusError;
 pub use model::*;

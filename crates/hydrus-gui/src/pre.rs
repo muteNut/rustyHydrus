@@ -1113,6 +1113,7 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
                     rh_mean: 50.0,
                     wind_kmd: 150.0,
                     sun_hours: 8.0,
+					..Default::default()
                 });
                 r.t += 1.0;
                 mp.records.push(r);

@@ -1,4 +1,4 @@
-//! Project data model. All quantities are expressed in the user's units
+	//! Project data model. All quantities are expressed in the user's units
 //! (length/time/mass units chosen in [`Units`]), exactly as in HYDRUS-1D.
 //!
 //! Node ordering in the *project* is top -> bottom (like Profile.dat and
@@ -80,7 +80,9 @@ pub struct Processes {
     pub equilibrium_adsorption: bool,
     /// Report only at print times (lShort).
     pub short_output: bool,
+    pub vapor: bool,
 }
+
 impl Default for Processes {
     fn default() -> Self {
         Processes {
@@ -91,6 +93,7 @@ impl Default for Processes {
             root_growth: false,
             equilibrium_adsorption: true,
             short_output: false,
+            vapor: false,
         }
     }
 }
@@ -109,7 +112,12 @@ pub enum SoilModel {
     Kosugi,
     /// Durner dual-porosity function (5)
     Durner,
+    /// Dual-porosity model with water-content driven exchange (6)
+    DualPorosityW,
+    /// Dual-porosity model with pressure-head driven exchange (7)
+    DualPorosityH,
 }
+
 impl SoilModel {
     pub fn code(self) -> i32 {
         match self {
@@ -119,8 +127,11 @@ impl SoilModel {
             SoilModel::VGAirEntry => 3,
             SoilModel::Kosugi => 4,
             SoilModel::Durner => 5,
+            SoilModel::DualPorosityW => 6,
+            SoilModel::DualPorosityH => 7,
         }
     }
+
     pub fn from_code(c: i32) -> Option<Self> {
         Some(match c {
             0 => SoilModel::VanGenuchten,
@@ -129,9 +140,12 @@ impl SoilModel {
             3 => SoilModel::VGAirEntry,
             4 => SoilModel::Kosugi,
             5 => SoilModel::Durner,
+            6 => SoilModel::DualPorosityW,
+            7 => SoilModel::DualPorosityH,
             _ => return None,
         })
     }
+
     pub fn name(self) -> &'static str {
         match self {
             SoilModel::VanGenuchten => "van Genuchten - Mualem",
@@ -140,13 +154,18 @@ impl SoilModel {
             SoilModel::VGAirEntry => "van Genuchten with air-entry value (2 cm)",
             SoilModel::Kosugi => "Kosugi log-normal",
             SoilModel::Durner => "Durner dual-porosity",
+            SoilModel::DualPorosityW => "Dual-porosity (water content driven)",
+            SoilModel::DualPorosityH => "Dual-porosity (pressure head driven)",
         }
     }
+
     /// Labels of the extra parameters stored in `SoilMaterial::extra`.
     pub fn extra_labels(self) -> &'static [&'static str] {
         match self {
             SoilModel::ModifiedVG => &["θm", "θa", "θk", "Kk"],
             SoilModel::Durner => &["w2", "α2", "n2"],
+            SoilModel::DualPorosityW => &["θr,im", "θs,im", "ω"],
+            SoilModel::DualPorosityH => &["θr,im", "θs,im", "α_im", "n_im", "ω"],
             _ => &[],
         }
     }
@@ -190,15 +209,14 @@ pub struct SoilMaterial {
     pub n: f64,
     pub ks: f64,
     pub l: f64,
-    /// Modified VG: [Qm, Qa, Qk, Kk]; Durner: [w2, alpha2, n2].
-    pub extra: [f64; 4],
-    /// Hysteresis: Qm for the drying branch (only used with hysteresis).
+    /// Modified VG: [Qm, Qa, Qk, Kk]; Durner: [w2, alpha2, n2]; Dual-porosity: [thr_im, ths_im, omega, alpha_im, ks_im]
+    pub extra: [f64; 5],
     pub qm: f64,
-    /// Hysteresis: wetting-branch Qs, alpha, Ks.
     pub qs_w: f64,
     pub alpha_w: f64,
     pub ks_w: f64,
 }
+
 impl Default for SoilMaterial {
     fn default() -> Self {
         SoilMaterial {
@@ -209,7 +227,7 @@ impl Default for SoilMaterial {
             n: 1.56,
             ks: 24.96,
             l: 0.5,
-            extra: [0.43, 0.078, 0.43, 24.96],
+            extra: [0.43, 0.078, 0.43, 24.96, 0.0],
             qm: 0.43,
             qs_w: 0.43,
             alpha_w: 0.072,
@@ -320,6 +338,7 @@ pub struct WaterFlow {
     /// Initial condition given as water content instead of pressure head (lInitW)
     pub init_in_water_content: bool,
     pub bc: WaterBc,
+	pub l_w_dep: bool,
 }
 impl Default for WaterFlow {
     fn default() -> Self {
@@ -335,6 +354,7 @@ impl Default for WaterFlow {
             materials: vec![SoilMaterial::default()],
             init_in_water_content: false,
             bc: WaterBc::default(),
+			l_w_dep: false,
         }
     }
 }
@@ -400,7 +420,6 @@ pub struct AtmRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Atmosphere {
     pub records: Vec<AtmRecord>,
-    /// Minimum surface pressure head in surface layer before runoff (hCritS)
     pub h_crit_s: f64,
     pub daily_variation: bool,
     pub sinusoidal_precip: bool,
@@ -408,9 +427,11 @@ pub struct Atmosphere {
     pub extinction: f64,
     pub interception: bool,
     pub interception_a: f64,
-    /// Records contain x_root (iRootIn == 0)
+    pub snow: bool,
+    pub snow_mf: f64,
     pub has_root_depth: bool,
-	pub meteo: Option<MeteoSettings>,
+    pub bc_cycles: bool,
+    pub meteo: Option<MeteoSettings>,
 }
 impl Default for Atmosphere {
     fn default() -> Self {
@@ -423,8 +444,11 @@ impl Default for Atmosphere {
             extinction: 0.463,
             interception: false,
             interception_a: 0.25,
+            snow: false,
+            snow_mf: 0.43,
             has_root_depth: false,
-			meteo: None,
+            bc_cycles: false,
+            meteo: None,
         }
     }
 }
@@ -828,7 +852,7 @@ impl Project {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MeteoRecord {
     pub t: f64,
     pub rad: f64,
@@ -836,7 +860,11 @@ pub struct MeteoRecord {
     pub t_min: f64,
     pub rh_mean: f64,
     pub wind_kmd: f64,
-    pub sun_hours: f64,
+	pub sun_hours: f64,
+    pub crop_height: Option<f64>,
+    pub albedo: Option<f64>,
+    pub lai: Option<f64>,
+    pub x_root: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -845,29 +873,23 @@ pub struct MeteoSettings {
     pub altitude: f64,
     pub short_wave_a: f64,
     pub short_wave_b: f64,
-    /// Cloudiness effect on longwave radiation (a1, b1 in GUI)
     pub long_wave_a: f64,
     pub long_wave_b: f64,
-    /// Emissivity effect on longwave radiation (al, bl in GUI)
     pub long_wave_a1: f64,
     pub long_wave_b1: f64,
-    /// Cloudiness factor from solar radiation (ac, bc in GUI)
     pub cloud_fact_ac: f64,
     pub cloud_fact_bc: f64,
     pub wind_height: f64,
     pub temp_height: f64,
-    /// 0 potential, 1 solar (measured), 2 net radiation given directly
     pub i_radiation: i32,
-    /// 0 sunshine hours, 1 cloudiness, 2 transmission coefficient, 3 solar radiation
     pub i_sun_sh: i32,
-    /// 0 relative humidity, 1 vapor pressure
     pub i_rel_hum: i32,
     pub hargreaves: bool,
-    /// 0 = bare soil, nonzero = constant crop (no growth curve yet)
+	pub l_en_bal: bool,
+    pub l_daily: bool,
     pub i_crop: i32,
     pub crop_height: f64,
     pub albedo: f64,
-    /// 1 grass, 2 alfalfa, 3 given LAI
     pub i_lai: i32,
     pub lai: f64,
     pub r_extinct: f64,
@@ -893,6 +915,8 @@ impl Default for MeteoSettings {
             i_sun_sh: 3,     // Solar Radiation cloudiness default as shown in dialog
             i_rel_hum: 0,
             hargreaves: false,
+			l_en_bal: false,
+			l_daily: false,
             i_crop: 1,
             crop_height: 0.0,
             albedo: 0.23,

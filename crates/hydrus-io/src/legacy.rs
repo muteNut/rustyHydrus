@@ -186,21 +186,11 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
         l_act_rsu = t.b(4)?;
         l_flux = t.b(5)?;
     }
-    if l_snow && l_temp {
-        return bail_unsupported("snow accumulation (lSnow)");
-    }
-    if l_meteo {
-        return bail_unsupported("meteorological boundary conditions (Penman-Monteith / Hargreaves)");
-    }
-    if l_vapor {
-        return bail_unsupported("vapor flow");
-    }
+
     if l_act_rsu {
         return bail_unsupported("active root solute uptake");
     }
-    if l_wdep {
-        return bail_unsupported("temperature dependence of water flow (lWDep)");
-    }
+	
     let _ = l_flux;
     prj.processes = Processes {
         water_flow: l_wat,
@@ -225,6 +215,7 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
     prj.water.max_iter = t.i(0)? as usize;
     prj.water.tol_th = t.f(1)?;
     prj.water.tol_h = t.f(2)?;
+	prj.water.l_w_dep = l_wdep;
     s.skip()?;
     let t = s.read(4)?;
     let mut bc = WaterBc { atmospheric: atm_bc, ..Default::default() };
@@ -340,9 +331,7 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
     if i_model == 8 {
         return bail_unsupported("dual-permeability models");
     }
-    if i_model == 6 || i_model == 7 {
-        return bail_unsupported("dual-porosity mass-transfer models (iModel 6/7)");
-    }
+    
     prj.water.model = SoilModel::from_code(i_model).ok_or_else(|| HydrusError::Unsupported(format!("hydraulic model {}", i_model)))?;
     prj.water.hysteresis = Hysteresis::from_code(i_hyst);
     if i_hyst > 0 {
@@ -353,6 +342,8 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
     let npar = match prj.water.model {
         SoilModel::ModifiedVG => 10,
         SoilModel::Durner => 9,
+        SoilModel::DualPorosityW => 9,
+        SoilModel::DualPorosityH => 11,
         _ => 6,
     };
     prj.water.materials.clear();
@@ -463,6 +454,14 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
     // ---------------- Atmosph.in
     if top_inf || bot_inf || atm {
         read_atmosphere(&find("atmosph.in")?, &mut prj, l_temp, l_chem, ns, i_root_in, rec_has_root_depth)?;
+    }
+	
+	// ---------------- Meteo.in
+    if l_meteo {
+		prj.water.bc.atmospheric = true;
+        if let Ok(meteo_path) = find("meteo.in") {
+            read_meteo(&meteo_path, &mut prj)?;
+        }
     }
 
     // ---------------- Heat
@@ -709,26 +708,20 @@ fn read_atmosphere(path: &Path, prj: &mut Project, l_temp: bool, l_chem: bool, n
         at.daily_variation = t.b(0)?;
         at.sinusoidal_precip = t.b(1)?;
         at.lai_partitioning = t.b(2)?;
-        let bc_cycles = t.b(3)?;
+        at.bc_cycles = t.b(3)?;
         at.interception = t.b(4)?;
+
         if at.lai_partitioning {
             a.skip()?;
             at.extinction = a.read(1)?.f(0)?;
         }
-        if bc_cycles {
-            return bail_unsupported("boundary-condition cycles (lBCCycles)");
-        }
+        
         if at.interception {
             a.skip()?;
             at.interception_a = a.read(1)?.f(0)?;
         }
     }
-    if at.lai_partitioning {
-        return bail_unsupported("LAI-based ET partitioning (lLAI)");
-    }
-    if at.interception {
-        return bail_unsupported("interception (lInterc)");
-    }
+    
     a.skip()?;
     at.h_crit_s = a.read(1)?.f(0)?;
     a.skip()?;
@@ -751,7 +744,17 @@ fn read_atmosphere(path: &Path, prj: &mut Project, l_temp: bool, l_chem: bool, n
             ncol += 1;
         }
         let t = a.read(ncol)?;
-        let mut r = AtmRecord { t: t.f(0)?, prec: t.f(1)?, evap: t.f(2)?, transp: t.f(3)?, h_crit_a: t.f(4)?, r_bot: t.f(5)?, h_bot: t.f(6)?, h_top: t.f(7)?, ..Default::default() };
+        let mut r = AtmRecord {
+            t: t.f(0)?,
+            prec: t.f(1)?,
+            evap: t.f(2)?,
+            transp: t.f(3)?,
+            h_crit_a: t.f(4)?,
+            r_bot: t.f(5)?,
+            h_bot: t.f(6)?,
+            h_top: t.f(7)?,
+            ..Default::default()
+        };
         let mut k = 8;
         if l_temp {
             r.t_top = t.f(k)?;
@@ -890,4 +893,244 @@ fn read_chem(s: &mut Rd, prj: &mut Project, ver: i32, n_mat: usize, l_equil_flag
     sol.t_pulse = s.read(1)?.f(0)?;
     prj.solute = sol;
     Ok(())
+}
+fn read_meteo(path: &Path, prj: &mut Project) -> R<()> {
+    let mut m = Rd::open(path, "Meteo.in")?;
+    let _ver = m.version();
+
+    m.skip()?;
+    m.skip()?;
+    let t = m.read(3)?;
+    let num_records = t.i(0)? as usize;
+    let i_radiation = t.i(1)?;
+    let hargreaves = t.b(2)?;
+
+    // Line 4 & 5: Flags (lEnBal, lDaily, ...)
+    m.skip()?;
+    let flags = m.read(10)?;
+	let l_en_bal = flags.b(0)?;
+    let l_daily = flags.b(1)?;
+
+    // Latitude, Altitude
+    m.skip()?;
+    let t = m.read(2)?;
+    let latitude = t.f(0)?;
+    let altitude = t.f(1)?;
+
+    // ShortWaveRadA, ShortWaveRadB
+    m.skip()?;
+    let t = m.read(2)?;
+    let short_wave_a = t.f(0)?;
+    let short_wave_b = t.f(1)?;
+
+    // LongWaveRadA, LongWaveRadB
+    m.skip()?;
+    let t = m.read(2)?;
+    let long_wave_a = t.f(0)?;
+    let long_wave_b = t.f(1)?;
+
+    // LongWaveRadA1, LongWaveRadB1
+    m.skip()?;
+    let t = m.read(2)?;
+    let long_wave_a1 = t.f(0)?;
+    let long_wave_b1 = t.f(1)?;
+
+    // WindHeight, TempHeight
+    m.skip()?;
+    let t = m.read(2)?;
+    let wind_height = t.f(0)?;
+    let temp_height = t.f(1)?;
+
+    // iCrop, SunShine, RelativeHum
+    m.skip()?;
+    let t = m.read(3)?;
+    let i_crop = t.i(0)?;
+    let i_sun_sh = t.i(1)?;
+    let i_rel_hum = t.i(2)?;
+
+    // Albedo
+    m.skip()?;
+    let albedo = m.read(1)?.f(0)?;
+
+    // Daily values header rows (2 lines)
+    m.skip()?;
+    m.skip()?;
+	if let Some(next_line) = m.peek() {
+        if next_line.trim().starts_with('[') {
+            m.skip()?; // Skip units row if present
+        }
+    }
+
+    let x_conv = prj.units.x_conv(); // For crop height unit conversion (to cm)
+    let mut records = Vec::with_capacity(num_records);
+    loop {
+        match m.peek() {
+            None => break,
+            Some(l) if l.trim_start().to_ascii_lowercase().starts_with("end") => break,
+            _ => {}
+        }
+
+        // iCrop = 3 (daily) has 11 columns; otherwise standard 7 columns
+        let ncols = if i_crop == 3 { 11 } else { 7 };
+        let t = match m.read_opt(ncols) {
+            Ok(toks) => toks,
+            Err(_) => break,
+        };
+        if t.len() < 7 {
+            break;
+        }
+
+        let mut r = MeteoRecord {
+            t: t.f(0)?,
+            rad: t.f(1)?,
+            t_max: t.f(2)?,
+            t_min: t.f(3)?,
+            rh_mean: t.f(4)?,
+            wind_kmd: t.f(5)?,
+            sun_hours: t.f(6)?,
+            crop_height: None,
+            albedo: None,
+            lai: None,
+            x_root: None,
+        };
+
+        if i_crop == 3 && t.len() >= 11 {
+            // Conversion to cm as in TIME.FOR: CropHeight * 100. / xConv
+            r.crop_height = Some(t.f(7)? * 100.0 / x_conv);
+            r.albedo = Some(t.f(8)?);
+            r.lai = Some(t.f(9)?);
+            r.x_root = Some(t.f(10)?);
+        }
+
+        records.push(r);
+
+        if records.len() >= num_records {
+            break;
+        }
+    }
+
+    let settings = MeteoSettings {
+		latitude,
+        altitude,
+        short_wave_a,
+        short_wave_b,
+        long_wave_a,
+        long_wave_b,
+        long_wave_a1,
+        long_wave_b1,
+        wind_height,
+        temp_height,
+        i_radiation,
+        i_sun_sh,
+        i_rel_hum,
+        hargreaves,
+        l_en_bal,
+        l_daily,
+        i_crop,
+        albedo,
+        records,
+        ..Default::default()
+    };
+
+    prj.atmosphere.meteo = Some(settings);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_meteo_file() {
+        let meteo_content = r#"Pcp_File_Version=4
+* METEOROLOGICAL PARAMETERS AND INFORMATION |||||||||||||||||||||||||||||||
+ MeteoRecords Radiation Penman-Hargreaves
+            3        1       f
+  lEnBal  lDaily  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy
+       t       f       f       f       f       t       f       f       f       f
+ Latitude  Altitude
+    33.58        306
+ ShortWaveRadA  ShortWaveRadB
+          0.25            0.5
+ LongWaveRadA   LongWaveRadB
+           0.9            0.1
+ LongWaveRadA1  LongWaveRadB1
+          0.34         -0.139
+ WindHeight     TempHeight
+        200            150
+ iCrop (=0: no crop, =1: constant, =2: table, =3: daily)  SunShine  RelativeHum
+         0                                                2         0
+    Albedo
+      0.23
+Daily values
+       t        Rad        TMax        TMin     RHMean      Wind    SunHours
+   328.042          0       15.2       15.2         33     138.24      0.545 
+   328.083          0       14.9       14.9         32     103.68      0.545 
+   328.125          0         15         15         32     138.24      0.545 
+end *** END OF INPUT FILE 'METEO.IN' **********************************
+"#;
+
+        let temp_dir = std::env::temp_dir().join("hydrus_test_meteo");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let meteo_file = temp_dir.join("METEO.IN");
+        std::fs::write(&meteo_file, meteo_content).unwrap();
+
+        let mut prj = Project::default();
+        let res = read_meteo(&meteo_file, &mut prj);
+        assert!(res.is_ok());
+
+        let meteo = prj.atmosphere.meteo.expect("meteo settings should be parsed");
+        assert_eq!(meteo.records.len(), 3);
+        assert!((meteo.latitude - 33.58).abs() < 1e-4);
+        assert!((meteo.altitude - 306.0).abs() < 1e-4);
+        assert_eq!(meteo.i_radiation, 1);
+        assert_eq!(meteo.i_sun_sh, 2);
+        assert_eq!(meteo.records[0].t, 328.042);
+        assert_eq!(meteo.records[0].rh_mean, 33.0);
+    }
+	
+	#[test]
+    fn test_parse_meteo_file_hourly_and_energy_balance_flags() {
+        let meteo_content = r#"Pcp_File_Version=4
+* METEOROLOGICAL PARAMETERS AND INFORMATION |||||||||||||||||||||||||||||||
+ MeteoRecords Radiation Penman-Hargreaves
+            2        1       f
+  lEnBal  lDaily  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy
+       t       f       f       f       f       t       f       f       f       f
+ Latitude  Altitude
+    33.58        306
+ ShortWaveRadA  ShortWaveRadB
+          0.25            0.5
+ LongWaveRadA   LongWaveRadB
+           0.9            0.1
+ LongWaveRadA1  LongWaveRadB1
+          0.34         -0.139
+ WindHeight     TempHeight
+        200            150
+ iCrop (=0: no crop, =1: constant, =2: table, =3: daily)  SunShine  RelativeHum
+         0                                                2         0
+    Albedo
+      0.23
+Daily values
+       t        Rad        TMax        TMin     RHMean      Wind    SunHours
+   328.042          0       15.2       15.2         33     138.24      0.545 
+   328.083          0       14.9       14.9         32     103.68      0.545 
+end *** END OF INPUT FILE 'METEO.IN' **********************************
+"#;
+
+        let temp_dir = std::env::temp_dir().join("hydrus_test_meteo_hourly");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let meteo_file = temp_dir.join("METEO.IN");
+        std::fs::write(&meteo_file, meteo_content).unwrap();
+
+        let mut prj = Project::default();
+        let res = read_meteo(&meteo_file, &mut prj);
+        assert!(res.is_ok());
+
+        let meteo = prj.atmosphere.meteo.expect("meteo settings should be parsed");
+        assert!(meteo.l_en_bal);
+        assert!(!meteo.l_daily);
+        assert_eq!(meteo.records.len(), 2);
+        assert!((meteo.records[1].t - meteo.records[0].t - 0.041).abs() < 1e-3);
+    }
 }
