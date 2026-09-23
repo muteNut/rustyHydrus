@@ -95,6 +95,38 @@ impl Simulation {
         }
     }
 
+    fn lookup_tabular(&self, m: usize, him: f64) -> (f64, f64, f64) {
+        let tb = &self.tabs[m];
+        let n_pts = tb.h.len();
+        if n_pts == 0 {
+            return (0.0, 0.0, 0.0);
+        }
+        if him >= tb.h[0] {
+            return (tb.con[0], tb.cap[0], tb.the[0]);
+        }
+        if him <= tb.h[n_pts - 1] {
+            return (tb.con[n_pts - 1], tb.cap[n_pts - 1], tb.the[n_pts - 1]);
+        }
+
+        // Bisection lookup in descending pressure head table
+        let mut low = 0;
+        let mut high = n_pts - 1;
+        while high - low > 1 {
+            let mid = (low + high) / 2;
+            if tb.h[mid] <= him {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+
+        let dh = (him - tb.h[low]) / (tb.h[high] - tb.h[low]);
+        let coni = tb.con[low] + (tb.con[high] - tb.con[low]) * dh;
+        let capi = tb.cap[low] + (tb.cap[high] - tb.cap[low]) * dh;
+        let thei = tb.the[low] + (tb.the[high] - tb.the[low]) * dh;
+        (coni.max(1e-37), capi.max(0.0), thei.max(0.0))
+    }
+
     /// Hydraulic properties at every node (SetMat in Fortran).
     pub fn set_mat(&mut self, iter: usize) {
         let model = self.model;
@@ -109,6 +141,18 @@ impl Simulation {
                 hi2 = self.h_sat[m].min(self.h_new[i] / self.ah[i] / self.ah_w[m]);
             }
             let him = 0.1 * hi1 + 0.9 * hi2;
+			
+			if self.model == SoilModel::Tabular {
+                let (coni, capi, thei) = self.lookup_tabular(m, him);
+                self.con[i] = coni * self.ak[i] * self.ak_s[i];
+                self.cap[i] = capi * self.ath[i] * self.ath_s[i];
+                self.th_eq[i] = thei * self.ath[i] * self.ath_s[i];
+                if iter == 0 {
+                    self.con_o[i] = self.con[i];
+                }
+                continue;
+            }
+			
             let coni;
             if hi1 >= self.h_sat[m] && hi2 >= self.h_sat[m] {
                 coni = self.con_sat[m];

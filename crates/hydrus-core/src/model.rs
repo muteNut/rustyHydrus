@@ -4,6 +4,7 @@
 //! Node ordering in the *project* is top -> bottom (like Profile.dat and
 //! the GUI). The solver internally reorders to bottom -> top.
 
+use crate::material::MatTable;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +117,9 @@ pub enum SoilModel {
     DualPorosityW,
     /// Dual-porosity model with pressure-head driven exchange (7)
     DualPorosityH,
+	DualPermeability,
+    /// External user tabular retention and conductivity curves (Mater.in) (10)
+    Tabular,
 }
 
 impl SoilModel {
@@ -129,6 +133,8 @@ impl SoilModel {
             SoilModel::Durner => 5,
             SoilModel::DualPorosityW => 6,
             SoilModel::DualPorosityH => 7,
+			SoilModel::DualPermeability => 8,
+            SoilModel::Tabular => 10,
         }
     }
 
@@ -142,6 +148,8 @@ impl SoilModel {
             5 => SoilModel::Durner,
             6 => SoilModel::DualPorosityW,
             7 => SoilModel::DualPorosityH,
+			8 => SoilModel::DualPermeability,
+            10 => SoilModel::Tabular,
             _ => return None,
         })
     }
@@ -156,6 +164,8 @@ impl SoilModel {
             SoilModel::Durner => "Durner dual-porosity",
             SoilModel::DualPorosityW => "Dual-porosity (water content driven)",
             SoilModel::DualPorosityH => "Dual-porosity (pressure head driven)",
+            SoilModel::DualPermeability => "Dual-permeability",
+            SoilModel::Tabular => "Tabular (Mater.in)",
         }
     }
 
@@ -166,6 +176,7 @@ impl SoilModel {
             SoilModel::Durner => &["w2", "α2", "n2"],
             SoilModel::DualPorosityW => &["θr,im", "θs,im", "ω"],
             SoilModel::DualPorosityH => &["θr,im", "θs,im", "α_im", "n_im", "ω"],
+            SoilModel::DualPermeability => &["θr,m", "θs,m", "α_m", "n_m", "Ks,m"],
             _ => &[],
         }
     }
@@ -339,6 +350,7 @@ pub struct WaterFlow {
     pub init_in_water_content: bool,
     pub bc: WaterBc,
 	pub l_w_dep: bool,
+	pub tabs: Option<Vec<MatTable>>,
 }
 impl Default for WaterFlow {
     fn default() -> Self {
@@ -355,6 +367,7 @@ impl Default for WaterFlow {
             init_in_water_content: false,
             bc: WaterBc::default(),
 			l_w_dep: false,
+			tabs: None,
         }
     }
 }

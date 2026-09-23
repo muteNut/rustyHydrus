@@ -237,7 +237,7 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
         }
         self.sync();
         section(ui, "Not (yet) supported from the original code");
-        ui.label("Vapor flow, meteorological (Penman–Monteith) boundary conditions, snow, dual-porosity / dual-permeability, virus & colloid transport, Lenhard hysteresis, temperature/water-content dependent reaction rates, inverse (parameter estimation) module.");
+		ui.label("Virus & colloid transport, Lenhard hysteresis, temperature/water-content dependent reaction rates, inverse (parameter estimation) module.");
     }
 
     pub fn page_geometry(&mut self, ui: &mut Ui, ch: &mut bool) {
@@ -610,7 +610,18 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
         ui.horizontal(|ui| {
             ui.label("Soil hydraulic model");
             ComboBox::from_id_salt("model").selected_text(self.prj.water.model.name()).show_ui(ui, |ui| {
-                for m in [SoilModel::VanGenuchten, SoilModel::ModifiedVG, SoilModel::BrooksCorey, SoilModel::VGAirEntry, SoilModel::Kosugi, SoilModel::Durner] {
+                for m in [
+                    SoilModel::VanGenuchten,
+                    SoilModel::ModifiedVG,
+                    SoilModel::BrooksCorey,
+                    SoilModel::VGAirEntry,
+                    SoilModel::Kosugi,
+                    SoilModel::Durner,
+                    SoilModel::DualPorosityW,
+                    SoilModel::DualPorosityH,
+                    SoilModel::DualPermeability,
+                    SoilModel::Tabular,
+                ] {
                     if ui.selectable_value(&mut self.prj.water.model, m, m.name()).changed() {
                         *ch = true;
                     }
@@ -655,8 +666,33 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
         let xc = p.units.x_conv();
         let m = &p.water.materials[mi];
         let par = material::par_of(m, p.water.model, xc);
-        let hs = log_space(1e-2 * xc, 1e5 * xc, 200);
         let model = p.water.model;
+        let lu = p.units.length_str();
+
+        // If external table is active, plot directly from the table points
+        if model == SoilModel::Tabular {
+            if let Some(ref tabs) = p.water.tabs {
+                if let Some(tb) = tabs.get(mi) {
+                    let mut th = vec![];
+                    let mut k = vec![];
+                    let mut c = vec![];
+                    for idx in 0..tb.h.len() {
+                        let x = (-tb.h[idx].min(-1e-6)).log10();
+                        th.push([x, tb.the[idx]]);
+                        k.push([x, tb.con[idx].max(1e-30).log10()]);
+                        c.push([x, tb.cap[idx].max(1e-30).log10()]);
+                    }
+                    ui.columns(3, |cols| {
+                        Plot::new(format!("{}th", id)).height(240.0).x_axis_label(format!("log10 |h| ({})", lu)).y_axis_label("θ").show(&mut cols[0], |pu| pu.line(Line::new(PlotPoints::from(th)).color(PALETTE[0])));
+                        Plot::new(format!("{}k", id)).height(240.0).x_axis_label(format!("log10 |h| ({})", lu)).y_axis_label("log10 K").show(&mut cols[1], |pu| pu.line(Line::new(PlotPoints::from(k)).color(PALETTE[1])));
+                        Plot::new(format!("{}c", id)).height(240.0).x_axis_label(format!("log10 |h| ({})", lu)).y_axis_label("log10 C").show(&mut cols[2], |pu| pu.line(Line::new(PlotPoints::from(c)).color(PALETTE[2])));
+                    });
+                    return;
+                }
+            }
+        }
+
+        let hs = log_space(1e-2 * xc, 1e5 * xc, 200);
         let (mut th, mut k, mut c) = (vec![], vec![], vec![]);
         for h in hs {
             let x = h.log10();
@@ -664,7 +700,6 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
             k.push([x, material::fk(model, -h, &par).max(1e-30).log10()]);
             c.push([x, material::fc(model, -h, &par).max(1e-30).log10()]);
         }
-        let lu = p.units.length_str();
         ui.columns(3, |cols| {
             Plot::new(format!("{}th", id)).height(240.0).x_axis_label(format!("log10 |h| ({})", lu)).y_axis_label("θ").show(&mut cols[0], |pu| pu.line(Line::new(PlotPoints::from(th)).color(PALETTE[0])));
             Plot::new(format!("{}k", id)).height(240.0).x_axis_label(format!("log10 |h| ({})", lu)).y_axis_label("log10 K").show(&mut cols[1], |pu| pu.line(Line::new(PlotPoints::from(k)).color(PALETTE[1])));

@@ -3,6 +3,7 @@
 //! The reading order and the list-directed semantics follow INPUT.FOR
 //! (BasInf, NodInf, MatIn, TmIn, RootIn, TempIn, ChemIn, SinkIn) and SetBC.
 
+use hydrus_core::material::MatTable;
 use hydrus_core::*;
 use std::path::Path;
 
@@ -172,7 +173,7 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
     let t = s.read(10)?;
     let (l_wat, l_chem, l_temp, sink_f, l_root, short_o) = (t.b(0)?, t.b(1)?, t.b(2)?, t.b(3)?, t.b(4)?, t.b(5)?);
     let (l_wdep, atm_bc, l_equil) = (t.b(6)?, t.b(8)?, t.b(9)?);
-    let (mut l_snow, mut l_meteo, mut l_vapor, mut l_act_rsu, mut l_flux) = (false, false, false, false, false);
+    let (mut l_snow, mut l_meteo, mut l_vapor, mut l_act_rsu, mut _l_flux) = (false, false, false, false, false);
     if ver == 3 {
         s.skip()?;
         let t = s.read(4)?;
@@ -184,14 +185,15 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
         l_meteo = t.b(2)?;
         l_vapor = t.b(3)?;
         l_act_rsu = t.b(4)?;
-        l_flux = t.b(5)?;
+        _l_flux = t.b(5)?;
     }
 
     if l_act_rsu {
         return bail_unsupported("active root solute uptake");
     }
+
+    prj.atmosphere.snow = l_snow;
 	
-    let _ = l_flux;
     prj.processes = Processes {
         water_flow: l_wat,
         solute: l_chem,
@@ -200,6 +202,7 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
         root_growth: l_root,
         equilibrium_adsorption: l_equil,
         short_output: short_o,
+		vapor: l_vapor,
     };
     s.skip()?;
     let t = s.read(3)?;
@@ -331,8 +334,16 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
     if i_model == 8 {
         return bail_unsupported("dual-permeability models");
     }
-    
-    prj.water.model = SoilModel::from_code(i_model).ok_or_else(|| HydrusError::Unsupported(format!("hydraulic model {}", i_model)))?;
+
+    prj.water.model = SoilModel::from_code(i_model)
+        .ok_or_else(|| HydrusError::Unsupported(format!("hydraulic model {}", i_model)))?;
+
+    // Check for external tabular model (Model 10)
+    if prj.water.model == SoilModel::Tabular {
+        let mater_path = find("mater.in")?;
+        prj.water.tabs = Some(read_mater_in(&mater_path, n_mat)?);
+    }
+
     prj.water.hysteresis = Hysteresis::from_code(i_hyst);
     if i_hyst > 0 {
         s.skip()?;
@@ -344,11 +355,16 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
         SoilModel::Durner => 9,
         SoilModel::DualPorosityW => 9,
         SoilModel::DualPorosityH => 11,
+        SoilModel::Tabular => 6, // Standard 6 parameters in Selector.in (Qr, Qs, Alfa, n, Ks, l)
         _ => 6,
     };
+
     prj.water.materials.clear();
     for m in 0..n_mat {
-        let mut mat = SoilMaterial { name: format!("Material {}", m + 1), ..Default::default() };
+        let mut mat = SoilMaterial {
+            name: format!("Material {}", m + 1),
+            ..Default::default()
+        };
         if i_hyst == 0 {
             let t = s.read(npar)?;
             mat.qr = t.f(0)?;
@@ -1034,6 +1050,53 @@ fn read_meteo(path: &Path, prj: &mut Project) -> R<()> {
 
     prj.atmosphere.meteo = Some(settings);
     Ok(())
+}
+
+/// Read an external user-defined material table file (Mater.in, Model 10).
+pub fn read_mater_in(path: &Path, n_mat: usize) -> R<Vec<MatTable>> {
+    let mut rd = Rd::open(path, "Mater.in")?;
+    let mut tabs = Vec::with_capacity(n_mat);
+
+    for m in 0..n_mat {
+        let header = rd.line()?;
+        if header.trim().is_empty() {
+            return perr(format!("Mater.in: empty header for material {}", m + 1));
+        }
+
+        let n_points = rd.read(1)?.i(0)? as usize;
+        if n_points < 2 {
+            return perr(format!(
+                "Mater.in: material {} requires at least 2 points, found {}",
+                m + 1,
+                n_points
+            ));
+        }
+
+        let mut t = MatTable {
+            h: Vec::with_capacity(n_points),
+            the: Vec::with_capacity(n_points),
+            con: Vec::with_capacity(n_points),
+            cap: Vec::with_capacity(n_points),
+        };
+
+        for pt in 0..n_points {
+            let row = rd.read(4).map_err(|e| {
+                HydrusError::Parse(format!(
+                    "Mater.in: failed reading row {} for material {}: {}",
+                    pt + 1,
+                    m + 1,
+                    e
+                ))
+            })?;
+            t.h.push(row.f(0)?);
+            t.the.push(row.f(1)?);
+            t.con.push(row.f(2)?);
+            t.cap.push(row.f(3)?);
+        }
+
+        tabs.push(t);
+    }
+    Ok(tabs)
 }
 
 #[cfg(test)]

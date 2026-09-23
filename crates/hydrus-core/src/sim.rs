@@ -177,6 +177,16 @@ pub struct Simulation {
     pub th_old_im: Vec<f64>,
     pub sink_im: Vec<f64>,
     pub w_transf: f64,
+	// Dual permeability state (Model 8)
+    pub l_dual_perm: bool,
+    pub w_fracture: f64,
+    pub alpha_dw: f64,
+    pub h_matrix_new: Vec<f64>,
+    pub h_matrix_old: Vec<f64>,
+    pub th_matrix_new: Vec<f64>,
+    pub th_matrix_old: Vec<f64>,
+    pub con_matrix: Vec<f64>,
+    pub cap_matrix: Vec<f64>,
     // sub-models
     pub heat: Option<HeatState>,
     pub sol: Option<SoluteState>,
@@ -251,7 +261,12 @@ impl Simulation {
             h1 = -0.0001 * x_conv;
             hn = -100.0 * x_conv;
         }
-        let tabs: Vec<MatTable> = par_d.iter().map(|p| MatTable::build(model, p, h1, hn)).collect();
+        let tabs = if let Some(ref external_tabs) = prj.water.tabs {
+            external_tabs.clone()
+        } else {
+            par_d.iter().map(|p| MatTable::build(model, p, h1, hn)).collect()
+        };
+
         let h_sat: Vec<f64> = par_d.iter().map(|p| fh(model, 1.0, p)).collect();
         let con_sat: Vec<f64> = par_d.iter().map(|p| p[4]).collect();
         let thr: Vec<f64> = par_d.iter().map(|p| p[0]).collect();
@@ -351,6 +366,10 @@ impl Simulation {
 			let m = mat[i];
 			th_init_im[i] = par_d[m][7]; // default to ths_im
 		}
+		
+		let l_dual_perm = model == SoilModel::DualPermeability;
+		let w_fracture = if l_dual_perm { 0.1 } else { 0.0 };
+		let alpha_dw = if l_dual_perm { 1e-4 } else { 0.0 };
 
         let tm = &prj.time;
         let mut t_print = tm.print_times.clone();
@@ -504,10 +523,19 @@ impl Simulation {
             v_v_new: vec![0.0; n],
             v_v_old: vec![0.0; n],
 			i_dual_por,
-			th_new_im: th_init_im.clone(),
-			th_old_im: th_init_im,
-			sink_im: vec![0.0; n],
-			w_transf: 0.0,
+            th_new_im: th_init_im.clone(),
+            th_old_im: th_init_im,
+            sink_im: vec![0.0; n],
+            w_transf: 0.0,
+            l_dual_perm,
+            w_fracture,
+            alpha_dw,
+            h_matrix_new: h0.clone(),
+            h_matrix_old: h0.clone(),
+            th_matrix_new: vec![0.0; n],
+            th_matrix_old: vec![0.0; n],
+            con_matrix: vec![0.0; n],
+            cap_matrix: vec![0.0; n],
             heat: None,
             sol: None,
             res: Results { n_solutes: ns, ..Default::default() },
@@ -882,6 +910,10 @@ impl Simulation {
 		if self.i_dual_por > 0 {
 			self.th_old_im.copy_from_slice(&self.th_new_im);
 		}
+		if self.l_dual_perm {
+            self.h_matrix_old.copy_from_slice(&self.h_matrix_new);
+            self.th_matrix_old.copy_from_slice(&self.th_matrix_new);
+        }
         if self.l_wat {
             for i in i_bot..=i_top {
                 if self.h_new[i] < 0.0 && self.h_old[i] < 0.0 {

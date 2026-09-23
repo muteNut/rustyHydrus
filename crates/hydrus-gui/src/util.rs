@@ -53,20 +53,28 @@ pub fn day_to_unit(p: &Project) -> f64 {
     }
 }
 
-pub fn apply_catalog(m: &mut SoilMaterial, idx: usize, prj_l: f64, prj_t: f64) {
-    let c = SOIL_CATALOG[idx];
-    m.name = c.0.to_string();
-    m.qr = c.1;
-    m.qs = c.2;
-    m.alpha = c.3 / prj_l;
-    m.n = c.4;
-    m.ks = c.5 * prj_l * prj_t;
-    m.l = 0.5;
-    m.extra = [c.2, c.1, c.2, m.ks];
-    m.qm = c.2;
-    m.qs_w = c.2;
-    m.alpha_w = 2.0 * m.alpha;
-    m.ks_w = m.ks;
+pub fn apply_catalog(m: &mut SoilMaterial, idx: usize, lf: f64, tf: f64) {
+    if let Some(c) = SOIL_CATALOG.get(idx) {
+        m.name = c.0.to_string();
+        m.qr = c.1;
+        m.qs = c.2;
+        m.alpha = c.3 * lf;
+        m.n = c.4;
+        m.ks = c.5 * lf / tf;
+        m.l = 0.5;
+        m.qm = c.2;
+        m.qs_w = c.2;
+        m.alpha_w = m.alpha * 2.0;
+        m.ks_w = m.ks;
+
+        // Reset extra parameters cleanly and configure defaults if ModifiedVG is active
+        m.extra = [0.0; 5];
+        // For Modified VG compatibility: [Qm, Qa, Qk, Kk]
+        m.extra[0] = m.qs;
+        m.extra[1] = m.qr;
+        m.extra[2] = m.qs;
+        m.extra[3] = m.ks;
+    }
 }
 
 pub fn log_space(a: f64, b: f64, n: usize) -> Vec<f64> {
