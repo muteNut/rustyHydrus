@@ -502,6 +502,11 @@ pub struct RootUptake {
     pub solute_stress: Option<SoluteStress>,
     pub growth: RootGrowthMode,
     pub c_root_max: Vec<f64>,
+	// Active root solute uptake (Michaelis-Menten)
+    pub l_act_rsu: bool,
+    pub omega_act: Vec<f64>,
+    pub r_km: Vec<f64>,
+    pub c_min: Vec<f64>,
 }
 impl Default for RootUptake {
     fn default() -> Self {
@@ -519,6 +524,10 @@ impl Default for RootUptake {
             solute_stress: None,
             growth: RootGrowthMode::FromAtmosphere,
             c_root_max: vec![0.0],
+			l_act_rsu: false,
+			omega_act: vec![0.0],
+			r_km: vec![0.0],
+			c_min: vec![0.0],
         }
     }
 }
@@ -597,6 +606,17 @@ pub struct SpeciesMaterial {
     pub mu0_s: f64,
     pub mu0_g: f64,
     pub omega: f64,
+	// Colloid / virus attachment & filtration parameters
+    pub s_max1: f64,
+    pub r_ka1: f64,
+    pub r_kd1: f64,
+    pub s_max2: f64,
+    pub r_ka2: f64,
+    pub r_kd2: f64,
+    pub i_psi1: i32,
+    pub i_psi2: i32,
+    pub d_c: f64,
+    pub d_p: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -647,6 +667,17 @@ pub struct SoluteSettings {
     pub mass_init: bool,
     pub d_surf: f64,
     pub c_atm: f64,
+	pub l_bact: bool,
+    pub l_filtr: bool,
+	pub l_tdep: bool,
+    pub t_dep: Vec<SpeciesTDep>,
+    pub l_moist: bool,
+	pub i_moist_dep: i32,
+    pub w_dep: Vec<SpeciesWDep>,
+    pub moist_tables: Vec<MoistDepTable>,
+	pub l_dual_neq: bool,
+	pub i_conc_type: i32,
+	pub l_nequil: bool,
 }
 impl Default for SoluteSettings {
     fn default() -> Self {
@@ -669,6 +700,17 @@ impl Default for SoluteSettings {
             mass_init: false,
             d_surf: 0.0,
             c_atm: 0.0,
+			l_bact: false, 
+			l_filtr: false,
+			l_tdep: false,
+            t_dep: vec![],
+            l_moist: false,
+            w_dep: vec![],
+			l_dual_neq: false,
+			i_conc_type: 1,
+			l_nequil: false,
+			moist_tables: vec![],
+			i_moist_dep: 1,
         }
     }
 }
@@ -939,4 +981,42 @@ impl Default for MeteoSettings {
             records: vec![],
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SpeciesTDep {
+    pub diff_w: f64,
+    pub diff_g: f64,
+    pub ks: f64,
+    pub nu: f64,
+    pub beta: f64,
+    pub henry: f64,
+    pub mu_w: f64,
+    pub mu_s: f64,
+    pub mu_g: f64,
+    pub gam_w: f64,
+    pub gam_s: f64,
+    pub gam_g: f64,
+    pub mu0_w: f64,
+    pub mu0_s: f64,
+    pub mu0_g: f64,
+    pub omega: f64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SpeciesWDep {
+    /// Exponent B for the 9 reaction parameters:
+    /// [mu_w, mu_s, mu_g, gam_w, gam_s, gam_g, mu0_w, mu0_s, mu0_g]
+    pub exp_b: [f64; 9],
+    /// Reference pressure head h_ref (negative, cm) for the 9 reaction parameters
+    pub h_ref: [f64; 9],
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MoistDepTable {
+    /// Water contents theta in ascending order
+    pub theta: Vec<f64>,
+    /// Scaling reduction factors (one vector of length matching theta for each of the 9 reaction parameters)
+    /// [mu_w, mu_s, mu_g, gam_w, gam_s, gam_g, mu0_w, mu0_s, mu0_g]
+    pub factors: [Vec<f64>; 9],
 }

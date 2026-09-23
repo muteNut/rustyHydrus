@@ -49,6 +49,13 @@ pub fn par_of(m: &SoilMaterial, model: SoilModel, x_conv: f64) -> Par {
             p[9] = m.extra[3]; // n_im
             p[10] = m.extra[4]; // Omega
         }
+		SoilModel::DualPermeability => {
+            p[6] = m.extra[0]; // thr_m
+            p[7] = m.extra[1]; // ths_m
+            p[8] = m.extra[2]; // alpha_m
+            p[9] = m.extra[3]; // n_m
+            p[10] = m.extra[4]; // ks_m
+        }
         _ => {}
     }
     p

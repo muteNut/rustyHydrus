@@ -126,6 +126,144 @@ impl Simulation {
         let thei = tb.the[low] + (tb.the[high] - tb.the[low]) * dh;
         (coni.max(1e-37), capi.max(0.0), thei.max(0.0))
     }
+	
+	/// Evaluate matrix hydraulic properties K_m(h_m) and C_m(h_m).
+    pub fn set_mat_matrix(&mut self) {
+        for i in 0..self.n {
+            let m = self.mat[i];
+            let par = &self.par_d[m];
+
+            // If extra matrix params were not specified, fallback to primary soil retention params
+            let (qr_m, qs_m, alpha_m, n_m, ks_m) = if par[7] > par[6] {
+                (par[6], par[7], par[8], par[9], par[10])
+            } else {
+                (par[0], par[1], par[2], par[3], par[4])
+            };
+
+            let par_m: Par = [
+                qr_m,
+                qs_m,
+                if alpha_m > 0.0 { alpha_m } else { par[2] },
+                if n_m > 1.0 { n_m } else { par[3] },
+                if ks_m > 0.0 { ks_m } else { par[4] },
+                par[5],
+                0.0, 0.0, 0.0, 0.0, 0.0,
+            ];
+
+            let hm = self.h_matrix_new[i].min(100.0);
+            self.con_matrix[i] = fk(SoilModel::VanGenuchten, hm, &par_m).max(1e-20);
+            self.cap_matrix[i] = fc(SoilModel::VanGenuchten, hm, &par_m).max(1e-12);
+            let q_min = qr_m.min(qs_m);
+            let q_max = qr_m.max(qs_m);
+            self.th_matrix_new[i] = fq(SoilModel::VanGenuchten, hm, &par_m).clamp(q_min, q_max);
+            if self.th_matrix_old[i] == 0.0 {
+                self.th_matrix_old[i] = self.th_matrix_new[i];
+            }
+        }
+    }
+
+    /// Assemble tridiagonal system for the matrix domain.
+    fn build_matrix_system(&mut self) -> Sys {
+        let n = self.n;
+        let dt = self.dt.max(1e-10);
+        let grav = self.cos_alf;
+        let w_m = (1.0 - self.w_fracture).clamp(0.001, 0.999);
+
+        let mut p = vec![0.0; n];
+        let mut r = vec![0.0; n];
+        let mut s = vec![0.0; n];
+
+        // Bottom node
+        let dxb = (self.x[1] - self.x[0]).abs().max(1e-6);
+        let dx = dxb / 2.0;
+        let conb = (self.con_matrix[0] + self.con_matrix[1]) / 2.0;
+        let b = conb * grav;
+        s[0] = -conb / dxb;
+        let f2 = (self.cap_matrix[0] * dx / dt).max(1e-12);
+        let rb = conb / dxb + f2;
+        let sb = -conb / dxb;
+        let r_bot_m = if self.free_d { -conb * grav } else { 0.0 };
+
+        let pb = b + f2 * self.h_matrix_new[0]
+            - (self.th_matrix_new[0] - self.th_matrix_old[0]) * dx / dt
+            + r_bot_m
+            + (self.sink_im[0] / w_m) * dx;
+
+        // Interior nodes
+        for i in 1..n - 1 {
+            let dxa = (self.x[i] - self.x[i - 1]).abs().max(1e-6);
+            let dxb = (self.x[i + 1] - self.x[i]).abs().max(1e-6);
+            let dx = (dxa + dxb) / 2.0;
+            let cona = (self.con_matrix[i] + self.con_matrix[i - 1]) / 2.0;
+            let conb = (self.con_matrix[i] + self.con_matrix[i + 1]) / 2.0;
+            let b = (cona - conb) * grav;
+            let a2 = cona / dxa + conb / dxb;
+            let a3 = -conb / dxb;
+            let f2 = (self.cap_matrix[i] * dx / dt).max(1e-12);
+            r[i] = a2 + f2;
+            p[i] = f2 * self.h_matrix_new[i]
+                - (self.th_matrix_new[i] - self.th_matrix_old[i]) * dx / dt
+                - b
+                + (self.sink_im[i] / w_m) * dx;
+            s[i] = a3;
+        }
+
+        // Top node
+        let m = n - 1;
+        let dxa = (self.x[m] - self.x[m - 1]).abs().max(1e-6);
+        let dx = dxa / 2.0;
+        let cona = (self.con_matrix[m] + self.con_matrix[m - 1]) / 2.0;
+        let b = cona * grav;
+        let f2 = (self.cap_matrix[m] * dx / dt).max(1e-12);
+        let rt = cona / dxa + f2;
+        let st = -cona / dxa;
+        let pt = f2 * self.h_matrix_new[m]
+            - (self.th_matrix_new[m] - self.th_matrix_old[m]) * dx / dt
+            - b
+            + (self.sink_im[m] / w_m) * dx;
+
+        Sys { p, r, s, pb, rb, sb, pt, rt, st }
+    }
+
+    /// Solve the tridiagonal matrix system for the matrix domain.
+    fn solve_matrix(&mut self, sys: &Sys) {
+        let n = self.n;
+        let rmin = 1e-100;
+        let mut diag = sys.r.clone();
+        let mut rhs = sys.p.clone();
+        let upper = sys.s.clone();
+        let mut lower = vec![0.0; n];
+        for i in 1..n {
+            lower[i] = sys.s[i - 1];
+        }
+        diag[0] = sys.rb;
+        rhs[0] = sys.pb;
+        diag[n - 1] = sys.rt;
+        lower[n - 1] = sys.st;
+        rhs[n - 1] = sys.pt;
+
+        for i in 1..n {
+            let mut d = diag[i - 1];
+            if d.abs() < rmin {
+                d = rmin.copysign(d);
+            }
+            let f = lower[i] / d;
+            diag[i] -= f * upper[i - 1];
+            rhs[i] -= f * rhs[i - 1];
+        }
+        let mut dn = diag[n - 1];
+        if dn.abs() < rmin {
+            dn = rmin.copysign(dn);
+        }
+        self.h_matrix_new[n - 1] = (rhs[n - 1] / dn).clamp(-1e5, 100.0);
+        for i in (0..n - 1).rev() {
+            let mut d = diag[i];
+            if d.abs() < rmin {
+                d = rmin.copysign(d);
+            }
+            self.h_matrix_new[i] = ((rhs[i] - upper[i] * self.h_matrix_new[i + 1]) / d).clamp(-1e5, 100.0);
+        }
+    }
 
     /// Hydraulic properties at every node (SetMat in Fortran).
     pub fn set_mat(&mut self, iter: usize) {
@@ -252,7 +390,12 @@ impl Simulation {
             let hh = self.h_old[i] / self.ah[i];
             if self.kappa[i] == 1 {
                 self.ath_s[i] = 1.0;
-                let sew = fs(model, hh, &self.par_w[m]);
+                let sew = if self.model == SoilModel::Tabular {
+                    let (_, _, th_val) = self.lookup_tabular(m, hh);
+                    if ths_w > thr { ((th_val - thr) / (ths_w - thr)).clamp(0.0, 1.0) } else { 1.0 }
+                } else {
+                    fs(model, hh, &self.par_w[m])
+                };
                 if sew < 0.999 {
                     self.ath_s[i] = (self.th_old[i] - ths) / (1.0 - sew) / (thr - ths_w);
                 }
@@ -260,25 +403,43 @@ impl Simulation {
                 self.ak_s[i] = 1.0;
                 self.con_r[i] = 0.0;
                 if self.i_hyst == 2 {
-                    let kw = self.ak[i] * fk(model, hh, &self.par_w[m]);
+                    let kw = if self.model == SoilModel::Tabular {
+                        let (k_val, _, _) = self.lookup_tabular(m, hh);
+                        self.ak[i] * k_val
+                    } else {
+                        self.ak[i] * fk(model, hh, &self.par_w[m])
+                    };
                     if kw < 0.999 * ks_w {
                         self.ak_s[i] = (self.con_o[i] - ks) / (kw - ks_w);
                     }
                     self.con_r[i] = ks - self.ak_s[i] * ks_w;
                 }
             } else {
-                self.ath_s[i] = (self.th_old[i] - thr) / fs(model, hh, &self.par_d[m]) / (ths_d - thr);
+                let se_d = if self.model == SoilModel::Tabular {
+                    let (_, _, th_val) = self.lookup_tabular(m, hh);
+                    if ths_d > thr { ((th_val - thr) / (ths_d - thr)).clamp(1e-6, 1.0) } else { 1.0 }
+                } else {
+                    fs(model, hh, &self.par_d[m]).max(1e-6)
+                };
+                self.ath_s[i] = (self.th_old[i] - thr) / se_d / (ths_d - thr);
                 self.th_rr[i] = thr;
                 self.ak_s[i] = 1.0;
                 self.con_r[i] = 0.0;
                 if self.i_hyst == 2 {
-                    self.ak_s[i] = self.con_o[i] / fk(model, hh, &self.par_d[m]) / self.ak[i];
+                    let kd = if self.model == SoilModel::Tabular {
+                        let (k_val, _, _) = self.lookup_tabular(m, hh);
+                        k_val
+                    } else {
+                        fk(model, hh, &self.par_d[m])
+                    };
+                    if kd > 1e-30 {
+                        self.ak_s[i] = self.con_o[i] / kd / self.ak[i];
+                    }
                 }
             }
-        }
-    }
+		}
+	}
 
-    /// Velocity at node i using the Fortran "Veloc" formula.
     /// Velocity at node i using the Fortran "Veloc" formula.
     pub fn veloc(
         &self,
@@ -389,10 +550,14 @@ impl Simulation {
         if let Some(d) = &self.prj.water.bc.drains {
             self.r_bot = d.flux(self.x[0] + self.h_new[0]);
         }
+		let w_f = self.w_fracture.max(0.001);
         let mut pb = b - self.sink[0] * dx + f2 * self.h_new[0] - (self.th_new[0] - self.th_old[0]) * dx / dt + self.r_bot;
 		if self.i_dual_por > 0 {
 			pb -= self.sink_im[0] * dx;
 		}
+		if self.l_dual_perm {
+            pb -= (self.sink_im[0] / w_f) * dx;
+        }
         if self.l_vapor || self.prj.water.l_w_dep {
             let mut con_tb = 0.0;
             if self.l_vapor {
@@ -414,6 +579,9 @@ impl Simulation {
             let b = (cona - conb) * grav;
 			if self.i_dual_por > 0 {
 				p[i] -= self.sink_im[i] * dx;
+			}
+			if self.l_dual_perm {
+            p[i] -= (self.sink_im[i] / w_f) * dx;
 			}
             if self.l_vapor {
                 cona += (self.con_vh[i] + self.con_vh[i - 1]) / 2.0;
@@ -458,6 +626,9 @@ impl Simulation {
         let mut pt = f2 * self.h_new[m] - (self.th_new[m] - self.th_old[m]) * dx / dt - self.sink[m] * dx - b;
 		if self.i_dual_por > 0 {
             pt -= self.sink_im[m] * dx;
+        }
+		if self.l_dual_perm {
+            pt -= (self.sink_im[m] / w_f) * dx;
         }
         if self.l_vapor || self.prj.water.l_w_dep {
             let mut con_ta = 0.0;
@@ -616,6 +787,9 @@ impl Simulation {
 			if self.i_dual_por > 0 {
                 self.dual_por();
             }
+            if self.l_dual_perm {
+                self.dual_perm();
+            }
             if self.w_layer && self.h_new[n - 1] > 0.0 && self.h_new[n - 1] < 0.00005 * self.x_conv && self.r_top >= 0.0 {
                 let m = self.mat[n - 1];
                 let hh = fh(self.model, 0.9999, &self.par_d[m]);
@@ -636,6 +810,12 @@ impl Simulation {
                 self.shift();
                 self.h_temp.copy_from_slice(&self.h_new);
                 self.solve(&sys);
+				if self.l_dual_perm {
+                    self.set_mat_matrix();
+                    let sys_m = self.build_matrix_system();
+                    self.solve_matrix(&sys_m);
+                    self.dual_perm();
+                }
                 for i in 0..n {
                     if self.h_new[i].abs() > rmax {
                         self.h_new[i] = rmax.copysign(self.h_new[i]);
@@ -699,6 +879,21 @@ impl Simulation {
             }
             for i in 0..n {
                 self.th_new[i] += self.cap[i] * (self.h_new[i] - self.h_temp[i]);
+            }
+            if self.l_dual_perm {
+                for i in 0..n {
+                    let m = self.mat[i];
+                    let par = &self.par_d[m];
+                    let (qr_m, qs_m) = if par[7] > par[6] {
+                        (par[6], par[7])
+                    } else {
+                        (par[0], par[1])
+                    };
+                    let q_min = qr_m.min(qs_m);
+                    let q_max = qr_m.max(qs_m);
+                    self.th_matrix_new[i] = (self.th_matrix_new[i] + self.cap_matrix[i] * (self.h_matrix_new[i] - self.h_matrix_old[i]))
+                        .clamp(q_min, q_max);
+                }
             }
             if self.w_layer && self.h_new[n - 1] > self.h_crit_s {
                 self.kod_top = 4;
@@ -803,7 +998,36 @@ impl Simulation {
             }
         }
     }
+	
+	/// Calculate water transfer Gamma_w between fracture and matrix domains.
+    pub fn dual_perm(&mut self) {
+        if !self.l_dual_perm {
+            return;
+        }
+        let n = self.n;
+        self.w_transf = 0.0;
 
+        for i in 0..n {
+            let m = self.mat[i];
+            let par = &self.par_d[m];
+            let par_m: Par = [par[6], par[7], par[8], par[9], par[10], par[5], 0.0, 0.0, 0.0, 0.0, 0.0];
+
+            let h_f = self.h_new[i];
+            let h_m = self.h_matrix_new[i];
+
+            // Effective interface conductivity K_a
+            let k_m = fk(SoilModel::VanGenuchten, h_m, &par_m);
+            let k_f_eval = fk(SoilModel::VanGenuchten, h_f, &par_m);
+            let k_a = 0.5 * (k_m + k_f_eval);
+
+            // Gamma_w = alpha_dw * K_a * (h_f - h_m)
+            self.sink_im[i] = self.alpha_dw * k_a * (h_f - h_m);
+
+            if i >= 1 {
+                self.w_transf += (self.sink_im[i - 1] + self.sink_im[i]) / 2.0 * (self.x[i] - self.x[i - 1]);
+            }
+        }
+    }
     fn it_cum_start(&mut self) {}
 }
 

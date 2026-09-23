@@ -770,6 +770,7 @@ impl Simulation {
                 self.res.failed = true;
                 return StepStatus::Failed;
             }
+            let _ = self.solute_cumulate(0.0);
         }
 
         // ---- output
@@ -962,5 +963,12 @@ impl Simulation {
     }
     pub fn depth_of(&self, i: usize) -> f64 {
         self.x[self.n - 1] - self.x[i]
+    }
+	pub fn theta_of(&self, m: usize, h: f64) -> f64 {
+        if m < self.par_d.len() {
+            crate::material::fq(self.model, h, &self.par_d[m])
+        } else {
+            0.0
+        }
     }
 }

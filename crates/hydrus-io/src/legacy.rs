@@ -187,12 +187,8 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
         l_act_rsu = t.b(4)?;
         _l_flux = t.b(5)?;
     }
-
-    if l_act_rsu {
-        return bail_unsupported("active root solute uptake");
-    }
-
     prj.atmosphere.snow = l_snow;
+	prj.root.l_act_rsu = l_act_rsu;
 	
     prj.processes = Processes {
         water_flow: l_wat,
@@ -539,6 +535,18 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
             prj.root.omega_c = t.f(1 + ncr)?;
         }
         prj.root.c_root_max = c_root_max;
+		if prj.root.l_act_rsu && ncr > 0 {
+            s.skip()?; // Header: OmegaAct, rKM, cMin
+            let t = s.read(3 * ncr)?;
+            prj.root.omega_act.clear();
+            prj.root.r_km.clear();
+            prj.root.c_min.clear();
+            for j in 0..ncr {
+                prj.root.omega_act.push(t.f(3 * j)?);
+                prj.root.r_km.push(t.f(3 * j + 1)?);
+                prj.root.c_min.push(t.f(3 * j + 2)?);
+            }
+        }
         s.skip()?;
         if i_mo_sink == 0 {
             let t = s.read(6)?;
@@ -823,14 +831,11 @@ fn read_chem(s: &mut Rd, prj: &mut Project, ver: i32, n_mat: usize, l_equil_flag
         sol.pe_cr = t.f(7)?;
         ns = t.i(8)? as usize;
         l_tort = t.b(9)?;
-        if t.i(10).unwrap_or(0) == 1 {
-            return bail_unsupported("virus / colloid transport (attachment-detachment)");
-        }
-        if t.b(11).unwrap_or(false) {
-            return bail_unsupported("filtration theory");
-        }
+        sol.l_bact = t.i(10).unwrap_or(0) == 1;
+        sol.l_filtr = t.b(11).unwrap_or(false);
     }
     sol.tortuosity = l_tort;
+    sol.l_tdep = l_tdep;
     let (mut l_moist, mut l_dual_neq, mut l_mass_ini, mut l_eq_init, mut l_var) = (false, false, false, false, false);
     if ver >= 4 {
         s.skip()?;
@@ -841,18 +846,11 @@ fn read_chem(s: &mut Rd, prj: &mut Project, ver: i32, n_mat: usize, l_equil_flag
         l_eq_init = t.b(4)?;
         l_var = t.b(5)?;
     }
-    if l_tdep {
-        return bail_unsupported("temperature dependence of solute parameters");
-    }
-    if l_moist {
-        return bail_unsupported("water-content dependence of reaction rates");
-    }
-    if l_dual_neq {
-        return bail_unsupported("dual non-equilibrium (physical + chemical) transport");
-    }
+    sol.l_moist = l_moist;
     sol.mass_init = l_mass_ini;
     sol.equil_init = l_eq_init;
     sol.tort_model = if l_var { 1 } else { 0 };
+	sol.l_dual_neq = l_dual_neq;
     if ns == 0 || ns > 11 {
         return perr("invalid number of solutes");
     }
@@ -870,7 +868,7 @@ fn read_chem(s: &mut Rd, prj: &mut Project, ver: i32, n_mat: usize, l_equil_flag
         s.skip()?;
         for _ in 0..n_mat {
             let t = s.read(14)?;
-            sp.per_material.push(SpeciesMaterial {
+            let mut sp_mat = SpeciesMaterial {
                 ks: t.f(0)?,
                 nu: t.f(1)?,
                 beta: t.f(2)?,
@@ -885,9 +883,72 @@ fn read_chem(s: &mut Rd, prj: &mut Project, ver: i32, n_mat: usize, l_equil_flag
                 mu0_s: t.f(11)?,
                 mu0_g: t.f(12)?,
                 omega: t.f(13)?,
-            });
+                ..Default::default()
+            };
+            if sol.l_bact {
+                // When lBact is true, HYDRUS encodes:
+                // SMax2 (pos 10), rKa2 (pos 11), rKd2 (pos 12), SMax1 (pos 13), etc.
+                sp_mat.s_max2 = sp_mat.mu0_s;
+                sp_mat.r_ka2 = sp_mat.mu0_g;
+                sp_mat.r_kd2 = sp_mat.omega;
+                // Standard default site 1 kinetics:
+                sp_mat.r_ka1 = sp_mat.ks;
+                sp_mat.r_kd1 = sp_mat.nu;
+            }
+            sp.per_material.push(sp_mat);
         }
         sol.species.push(sp);
+    }
+
+    sol.t_dep.clear();
+	sol.w_dep.clear();
+    if sol.l_moist {
+        for jj in 0..ns {
+            if jj == 0 {
+                s.skip()?; // Header: Water content dependence
+            }
+            s.skip()?; // Header
+            let _n_par2 = s.read(1)?.i(0)?;
+            s.skip()?; // Header: Exponents B
+            let t_exp = s.read(9)?;
+            s.skip()?; // Header: Reference h
+            let t_href = s.read(9)?;
+            let mut wdep = SpeciesWDep::default();
+            for k in 0..9 {
+                wdep.exp_b[k] = t_exp.f(k)?;
+                wdep.h_ref[k] = t_href.f(k)?;
+            }
+            sol.w_dep.push(wdep);
+        }
+    }
+   if sol.l_tdep {
+        for jj in 0..ns {
+            if jj == 0 {
+                s.skip()?; // Header: Temperature dependence
+            }
+            s.skip()?; // Header: Dif.w. Dif.g.
+            let t_diff = s.read(2)?;
+            s.skip()?; // Header: Ks Nu Beta Henry ...
+            let t_par = s.read(14)?;
+            sol.t_dep.push(SpeciesTDep {
+                diff_w: t_diff.f(0)?,
+                diff_g: t_diff.f(1)?,
+                ks: t_par.f(0)?,
+                nu: t_par.f(1)?,
+                beta: t_par.f(2)?,
+                henry: t_par.f(3)?,
+                mu_w: t_par.f(4)?,
+                mu_s: t_par.f(5)?,
+                mu_g: t_par.f(6)?,
+                gam_w: t_par.f(7)?,
+                gam_s: t_par.f(8)?,
+                gam_g: t_par.f(9)?,
+                mu0_w: t_par.f(10)?,
+                mu0_s: t_par.f(11)?,
+                mu0_g: t_par.f(12)?,
+                omega: t_par.f(13)?,
+            });
+        }
     }
     s.skip()?;
     let t = s.read(2 + 2 * ns)?;

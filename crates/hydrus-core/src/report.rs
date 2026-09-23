@@ -110,6 +110,20 @@ impl Simulation {
         let grav = self.cos_alf;
         let ns = self.n_species();
         let con_sn = self.con_sat[self.mat[n - 1]] * self.ak[n - 1];
+
+        let flux_concs = if self.l_chem && self.prj.solute.i_conc_type == 2 {
+            let mut fc = vec![vec![0.0; ns]; n];
+            for js in 0..ns {
+                let f_js = self.flux_conc(js);
+                for i in 0..n {
+                    fc[i][js] = f_js[i];
+                }
+            }
+            Some(fc)
+        } else {
+            None
+        };
+
         let mut nodes = Vec::with_capacity(n);
         for i in (0..n).rev() {
             let vi;
@@ -128,6 +142,24 @@ impl Simulation {
                 let vb = -(self.con[i] + self.con[i - 1]) / 2.0 * ((self.h_new[i] - self.h_new[i - 1]) / dxb + grav);
                 vi = (va * dxa + vb * dxb) / (dxa + dxb);
             }
+
+            let sorb2 = (0..ns).map(|j| {
+                self.sol.as_ref().map(|s| s.sorb2.get(j).map(|c| c[i]).unwrap_or(0.0)).unwrap_or(0.0)
+            }).collect();
+
+            let h_matrix = if self.l_dual_perm { Some(self.h_matrix_new[i]) } else { None };
+            let th_matrix = if self.l_dual_perm { Some(self.th_matrix_new[i]) } else { None };
+            let conc_matrix = if self.l_dual_perm {
+                Some((0..ns).map(|j| self.conc_matrix(j, i)).collect())
+            } else {
+                None
+            };
+            let sorb_matrix = if self.l_dual_perm {
+                Some((0..ns).map(|j| self.sorb_matrix(j, i)).collect())
+            } else {
+                None
+            };
+
             nodes.push(NodeOut {
                 node: n - i,
                 depth: self.x[n - 1] - self.x[i],
@@ -142,6 +174,12 @@ impl Simulation {
                 temp: self.temp(i),
                 conc: (0..ns).map(|j| self.conc(j, i)).collect(),
                 sorb: (0..ns).map(|j| self.sorb(j, i)).collect(),
+                sorb2,
+                h_matrix,
+                th_matrix,
+                conc_matrix,
+                sorb_matrix,
+                flux_conc: flux_concs.as_ref().map(|fc| fc[i].clone()),
             });
         }
         self.res.profiles.push(ProfileOut { t, nodes });
@@ -153,12 +191,35 @@ impl Simulation {
         }
         let n = self.n;
         let ns = self.n_species();
+
+        let flux_concs = if self.l_chem && self.prj.solute.i_conc_type == 2 {
+            let mut fc = vec![vec![0.0; ns]; n];
+            for js in 0..ns {
+                let f_js = self.flux_conc(js);
+                for i in 0..n {
+                    fc[i][js] = f_js[i];
+                }
+            }
+            Some(fc)
+        } else {
+            None
+        };
+
         let mut pts = vec![];
         for &nd in &self.prj.profile.observation_nodes {
             if nd < 1 || nd > n {
                 continue;
             }
             let i = n - nd;
+
+            let h_matrix = if self.l_dual_perm { Some(self.h_matrix_new[i]) } else { None };
+            let th_matrix = if self.l_dual_perm { Some(self.th_matrix_new[i]) } else { None };
+            let conc_matrix = if self.l_dual_perm {
+                Some((0..ns).map(|j| self.conc_matrix(j, i)).collect())
+            } else {
+                None
+            };
+
             pts.push(ObsPoint {
                 node: nd,
                 h: self.h_new[i],
@@ -166,6 +227,10 @@ impl Simulation {
                 temp: self.temp(i),
                 flux: self.v_new.get(i).copied().unwrap_or(0.0),
                 conc: (0..ns).map(|j| self.conc(j, i)).collect(),
+                flux_conc: flux_concs.as_ref().map(|fc| fc[i].clone()),
+                h_matrix,
+                th_matrix,
+                conc_matrix,
             });
         }
         self.res.obs.push(ObsOut { t: self.t, points: pts });

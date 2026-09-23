@@ -72,6 +72,12 @@ pub struct NodeOut {
     pub temp: f64,
     pub conc: Vec<f64>,
     pub sorb: Vec<f64>,
+    pub sorb2: Vec<f64>,
+    pub h_matrix: Option<f64>,
+    pub th_matrix: Option<f64>,
+    pub conc_matrix: Option<Vec<f64>>,
+    pub sorb_matrix: Option<Vec<f64>>,
+    pub flux_conc: Option<Vec<f64>>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -88,6 +94,10 @@ pub struct ObsPoint {
     pub temp: f64,
     pub flux: f64,
     pub conc: Vec<f64>,
+    pub flux_conc: Option<Vec<f64>>,
+    pub h_matrix: Option<f64>,
+    pub th_matrix: Option<f64>,
+    pub conc_matrix: Option<Vec<f64>>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
