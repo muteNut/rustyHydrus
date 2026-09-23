@@ -8,6 +8,7 @@ pub mod examples;
 pub mod heat;
 pub mod lenhard;
 pub mod material;
+pub mod meteo;
 pub mod model;
 pub mod output;
 pub mod report;

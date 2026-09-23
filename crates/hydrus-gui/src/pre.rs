@@ -120,7 +120,7 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
     }
 }
 
-impl App {
+	impl App {
     /// Keep all per-material / per-species vectors consistent with the project.
     pub fn sync(&mut self) {
         let nm = self.prj.water.materials.len();
@@ -226,6 +226,15 @@ impl App {
             });
         }
         check(ui, ch, &mut self.prj.processes.short_output, "Short output: write time-level information only at print times");
+		let mut has_meteo = self.prj.atmosphere.meteo.is_some();
+        if ui.checkbox(&mut has_meteo, "Meteorological ET (Penman-Monteith / Hargreaves)").changed() {
+            self.prj.atmosphere.meteo = if has_meteo {
+                Some(MeteoSettings::default())
+            } else {
+                None
+            };
+            *ch = true;
+        }
         self.sync();
         section(ui, "Not (yet) supported from the original code");
         ui.label("Vapor flow, meteorological (Penman–Monteith) boundary conditions, snow, dual-porosity / dual-permeability, virus & colloid transport, Lenhard hysteresis, temperature/water-content dependent reaction rates, inverse (parameter estimation) module.");
@@ -979,6 +988,184 @@ impl App {
                 pu.line(Line::new(PlotPoints::from(step(&|r| r.transp))).name("pot. transpiration").color(PALETTE[2]));
             });
         }
+    }
+
+    pub fn page_meteo(&mut self, ui: &mut Ui, ch: &mut bool) {
+        ui.heading("Meteorological parameters");
+
+        let Some(mp) = self.prj.atmosphere.meteo.as_mut() else {
+            ui.label("Meteorological ET is not enabled. Turn it on in 'Main processes & units'.");
+            return;
+        };
+
+        let tu = self.prj.units.time_str().to_string();
+
+        // ---------------- Top Mode Selection Group ----------------
+        section(ui, "Radiation & Cloudiness Input Options");
+        ui.columns(2, |cols| {
+            cols[0].group(|ui| {
+                ui.strong("Radiation Input");
+                ui.radio_value(&mut mp.i_radiation, 0, "Potential Radiation (Ra computed)");
+                ui.radio_value(&mut mp.i_radiation, 1, "Solar Radiation (measured Rs)");
+                ui.radio_value(&mut mp.i_radiation, 2, "Net Radiation (measured Rn)");
+            });
+
+            cols[1].group(|ui| {
+                ui.strong("Cloudiness / Sunshine Input");
+                ui.radio_value(&mut mp.i_sun_sh, 0, "Sunshine Hours");
+                ui.radio_value(&mut mp.i_sun_sh, 1, "Cloudiness Index");
+                ui.radio_value(&mut mp.i_sun_sh, 2, "Transmission Coeff. / Cloud Cover");
+                ui.radio_value(&mut mp.i_sun_sh, 3, "Derived from Solar Radiation");
+            });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Humidity specification:");
+            ui.radio_value(&mut mp.i_rel_hum, 0, "Relative Humidity (%)");
+            ui.radio_value(&mut mp.i_rel_hum, 1, "Vapor Pressure (kPa)");
+            check(ui, ch, &mut mp.hargreaves, "Use Hargreaves equation instead of Penman-Monteith");
+        });
+
+        // ---------------- Geographical & Radiation Parameters ----------------
+        section(ui, "Geographical & Radiation Parameters");
+        egui::Grid::new("meteo_geo").num_columns(4).striped(true).show(ui, |ui| {
+            ui.label("Latitude (° N+, S-)");
+            dv(ui, ch, &mut mp.latitude);
+            ui.label("Altitude (m)");
+            dv(ui, ch, &mut mp.altitude);
+            ui.end_row();
+
+            ui.label("Ångström a (shortwave)");
+            dv(ui, ch, &mut mp.short_wave_a);
+            ui.label("Ångström b (shortwave)");
+            dv(ui, ch, &mut mp.short_wave_b);
+            ui.end_row();
+
+            ui.label("Longwave cloud factor a1");
+            dv(ui, ch, &mut mp.long_wave_a);
+            ui.label("Longwave cloud factor b1");
+            dv(ui, ch, &mut mp.long_wave_b);
+            ui.end_row();
+
+            ui.label("Longwave emissivity al");
+            dv(ui, ch, &mut mp.long_wave_a1);
+            ui.label("Longwave emissivity bl");
+            dv(ui, ch, &mut mp.long_wave_b1);
+            ui.end_row();
+
+            if mp.i_sun_sh == 3 {
+                ui.label("Cloudiness from Solar ac");
+                dv(ui, ch, &mut mp.cloud_fact_ac);
+                ui.label("Cloudiness from Solar bc");
+                dv(ui, ch, &mut mp.cloud_fact_bc);
+                ui.end_row();
+            }
+
+            ui.label("Wind measurement height (cm)");
+            dv(ui, ch, &mut mp.wind_height);
+            ui.label("Temp. measurement height (cm)");
+            dv(ui, ch, &mut mp.temp_height);
+            ui.end_row();
+        });
+
+        // ---------------- Crop & Surface Parameters ----------------
+        section(ui, "Crop & Surface Parameters");
+        ui.horizontal(|ui| {
+            ui.label("Crop mode:");
+            ui.radio_value(&mut mp.i_crop, 0, "Bare Soil");
+            ui.radio_value(&mut mp.i_crop, 1, "Active Crop");
+        });
+
+        if mp.i_crop != 0 {
+            ui.horizontal(|ui| {
+                ui.label("Leaf Area Index (LAI):");
+                ui.radio_value(&mut mp.i_lai, 1, "From Height (Clipped Grass)");
+                ui.radio_value(&mut mp.i_lai, 2, "From Height (Alfalfa)");
+                ui.radio_value(&mut mp.i_lai, 3, "Direct Input / Surface Fraction");
+            });
+
+            egui::Grid::new("meteo_crop").num_columns(4).striped(true).show(ui, |ui| {
+                ui.label("Crop height (cm)");
+                dv(ui, ch, &mut mp.crop_height);
+                ui.label("Albedo");
+                dv(ui, ch, &mut mp.albedo);
+                ui.end_row();
+
+                if mp.i_lai == 3 {
+                    ui.label("Input LAI / Surface Fraction");
+                    dv(ui, ch, &mut mp.lai);
+                }
+                ui.label("Radiation Extinction Coeff.");
+                dv(ui, ch, &mut mp.r_extinct);
+                ui.end_row();
+            });
+        }
+
+        // ---------------- Meteorological Records Table ----------------
+        section(ui, "Meteorological Records");
+        ui.horizontal(|ui| {
+            if ui.button("➕ Add record").clicked() {
+                let mut r = mp.records.last().cloned().unwrap_or(MeteoRecord {
+                    t: 0.0,
+                    rad: 15.0,
+                    t_max: 20.0,
+                    t_min: 10.0,
+                    rh_mean: 50.0,
+                    wind_kmd: 150.0,
+                    sun_hours: 8.0,
+                });
+                r.t += 1.0;
+                mp.records.push(r);
+                *ch = true;
+            }
+            if ui.button("➖ Remove last").clicked() {
+                mp.records.pop();
+                *ch = true;
+            }
+            ui.label(format!("{} record(s)", mp.records.len()));
+        });
+
+        let heads = [
+            format!("t ({})", tu),
+            "Rad (MJ/m²)".into(),
+            "T Max (°C)".into(),
+            "T Min (°C)".into(),
+            if mp.i_rel_hum == 0 { "RH Mean (%)".into() } else { "Vapor (kPa)".into() },
+            "Wind (km/d)".into(),
+            match mp.i_sun_sh {
+                0 => "Sun Hours (h)",
+                1 => "Cloudiness",
+                2 => "Transm. Coeff",
+                _ => "Solar Factor",
+            }.into(),
+        ];
+
+        let num_records = mp.records.len();
+        let mut tb = TableBuilder::new(ui).striped(true).max_scroll_height(260.0);
+        for _ in 0..heads.len() {
+            tb = tb.column(Column::exact(110.0));
+        }
+
+        let recs = &mut mp.records;
+        tb.header(22.0, |mut h| {
+            for title in &heads {
+                h.col(|ui| {
+                    ui.strong(title);
+                });
+            }
+        })
+        .body(|body| {
+            body.rows(20.0, num_records, |mut row| {
+                let r = &mut recs[row.index()];
+                row.col(|ui| dv(ui, ch, &mut r.t));
+                row.col(|ui| dv(ui, ch, &mut r.rad));
+                row.col(|ui| dv(ui, ch, &mut r.t_max));
+                row.col(|ui| dv(ui, ch, &mut r.t_min));
+                row.col(|ui| dv(ui, ch, &mut r.rh_mean));
+                row.col(|ui| dv(ui, ch, &mut r.wind_kmd));
+                row.col(|ui| dv(ui, ch, &mut r.sun_hours));
+            });
+        });
     }
 
     pub fn page_root(&mut self, ui: &mut Ui, ch: &mut bool) {

@@ -142,6 +142,7 @@ pub struct Simulation {
     pub dt_max_t: f64,
     // atmosphere
     pub atm_idx: usize,
+	pub meteo_idx: usize,
     pub r_root_d: f64,
     pub r_soil_d: f64,
     pub prec_d: f64,
@@ -444,6 +445,7 @@ impl Simulation {
             dt_max_c: 1e30,
             dt_max_t: 1e30,
             atm_idx: 0,
+			meteo_idx: 0,
             r_root_d: 0.0,
             r_soil_d: 0.0,
             prec_d: 0.0,
@@ -499,9 +501,19 @@ impl Simulation {
         // atmospheric information
         if self.top_inf || self.bot_inf || self.atm_bc {
             self.atm_idx = 0;
+			self.meteo_idx = 0;
             self.t_atm2 = self.t_max;
             self.set_bc()?;
-            self.t_atm = self.t_atm1.min(self.t_atm2);
+			let mut next_atm_time = self.t_atm1.min(self.t_atm2);
+            if let Some(ref mp) = self.prj.atmosphere.meteo {
+                if self.meteo_idx < mp.records.len() {
+                    let t_meteo = mp.records[self.meteo_idx].t;
+                    if t_meteo > self.t_init {
+                        next_atm_time = next_atm_time.min(t_meteo);
+                    }
+                }
+            }
+            self.t_atm = next_atm_time;
             if self.l_chem {
                 self.set_chem_bc();
             }
@@ -615,7 +627,16 @@ impl Simulation {
                     return StepStatus::Failed;
                 }
             }
-            self.t_atm = self.t_atm1.min(self.t_atm2);
+            let mut next_atm_time = self.t_atm1.min(self.t_atm2);
+            if let Some(ref mp) = self.prj.atmosphere.meteo {
+                if self.meteo_idx < mp.records.len() {
+                    let t_meteo = mp.records[self.meteo_idx].t;
+                    if t_meteo > self.t {
+                        next_atm_time = next_atm_time.min(t_meteo);
+                    }
+                }
+            }
+            self.t_atm = next_atm_time;
             if self.l_chem {
                 self.set_chem_bc();
             }

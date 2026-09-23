@@ -42,6 +42,19 @@ impl Simulation {
                 }
             } else {
                 self.r_top = self.r_soil.abs() - self.prec.abs();
+				if let Some(ref mp) = self.prj.atmosphere.meteo {
+					while self.meteo_idx + 1 < mp.records.len() && self.t >= mp.records[self.meteo_idx].t {
+						self.meteo_idx += 1;
+					}
+					if let Some(rec) = mp.records.get(self.meteo_idx) {
+						let (evap_p, trans_p) = crate::meteo::potential_et(mp, rec, self.t_conv);
+						let r_conv = 0.001 * self.x_conv;
+						let tt_conv = 24.0 * 3600.0 * self.t_conv;
+						self.r_soil = evap_p * r_conv / tt_conv;
+						self.r_root = trans_p * r_conv / tt_conv;
+						self.r_top = self.r_soil.abs() - self.prec.abs();
+					}
+				}
                 if (r_top_old - self.r_top).abs() > self.r_top.abs() * 0.2 && self.r_top < 0.0 {
                     self.min_step = true;
                 }
@@ -62,7 +75,9 @@ impl Simulation {
             if self.kod_top == 3 || self.l_var_bc {
                 self.h_top = rec.h_top;
             }
-            self.r_root = rr.abs();
+			if self.prj.atmosphere.meteo.is_none() {
+				self.r_root = rr.abs();
+			}
         }
         if self.bot_inf {
             if (self.r_bot - rec.r_bot).abs() > self.r_bot.abs() * 0.2 {

@@ -410,6 +410,7 @@ pub struct Atmosphere {
     pub interception_a: f64,
     /// Records contain x_root (iRootIn == 0)
     pub has_root_depth: bool,
+	pub meteo: Option<MeteoSettings>,
 }
 impl Default for Atmosphere {
     fn default() -> Self {
@@ -423,6 +424,7 @@ impl Default for Atmosphere {
             interception: false,
             interception_a: 0.25,
             has_root_depth: false,
+			meteo: None,
         }
     }
 }
@@ -751,6 +753,24 @@ impl Project {
     pub fn validate(&self) -> Vec<String> {
         let mut e = vec![];
         let n = self.profile.nodes.len();
+		if let Some(meteo) = &self.atmosphere.meteo {
+			if meteo.records.is_empty() {
+				e.push("Meteorological ET is active, but no meteo records were provided.".into());
+			}
+			let dl0 = 0.667 * meteo.crop_height.max(0.1);
+			if meteo.wind_height <= dl0 || meteo.temp_height <= dl0 {
+				e.push(format!(
+				"Measurement heights (wind: {} cm, temp: {} cm) must be greater than displacement height ({:.2} cm).",
+				meteo.wind_height, meteo.temp_height, dl0
+				));
+			}
+			if meteo.i_radiation == 0 && meteo.long_wave_a.abs() < 1e-6 {
+				e.push("Cloudiness parameter long_wave_a (a1) cannot be zero when potential radiation is selected.".into());
+			}
+			if meteo.i_sun_sh == 3 && meteo.cloud_fact_ac.abs() < 1e-6 && meteo.cloud_fact_bc.abs() < 1e-6 {
+				e.push("Cloudiness parameters (ac, bc) must be set when estimating from solar radiation.".into());
+			}
+		}
         if n < 3 {
             e.push("The profile needs at least 3 nodes.".into());
         }
@@ -805,5 +825,81 @@ impl Project {
             e.push("Heat parameters are missing for some materials.".into());
         }
         e
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeteoRecord {
+    pub t: f64,
+    pub rad: f64,
+    pub t_max: f64,
+    pub t_min: f64,
+    pub rh_mean: f64,
+    pub wind_kmd: f64,
+    pub sun_hours: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeteoSettings {
+    pub latitude: f64,
+    pub altitude: f64,
+    pub short_wave_a: f64,
+    pub short_wave_b: f64,
+    /// Cloudiness effect on longwave radiation (a1, b1 in GUI)
+    pub long_wave_a: f64,
+    pub long_wave_b: f64,
+    /// Emissivity effect on longwave radiation (al, bl in GUI)
+    pub long_wave_a1: f64,
+    pub long_wave_b1: f64,
+    /// Cloudiness factor from solar radiation (ac, bc in GUI)
+    pub cloud_fact_ac: f64,
+    pub cloud_fact_bc: f64,
+    pub wind_height: f64,
+    pub temp_height: f64,
+    /// 0 potential, 1 solar (measured), 2 net radiation given directly
+    pub i_radiation: i32,
+    /// 0 sunshine hours, 1 cloudiness, 2 transmission coefficient, 3 solar radiation
+    pub i_sun_sh: i32,
+    /// 0 relative humidity, 1 vapor pressure
+    pub i_rel_hum: i32,
+    pub hargreaves: bool,
+    /// 0 = bare soil, nonzero = constant crop (no growth curve yet)
+    pub i_crop: i32,
+    pub crop_height: f64,
+    pub albedo: f64,
+    /// 1 grass, 2 alfalfa, 3 given LAI
+    pub i_lai: i32,
+    pub lai: f64,
+    pub r_extinct: f64,
+    pub records: Vec<MeteoRecord>,
+}
+
+impl Default for MeteoSettings {
+    fn default() -> Self {
+        MeteoSettings {
+            latitude: 40.0,
+            altitude: 110.0,
+            short_wave_a: 0.25,
+            short_wave_b: 0.50,
+            long_wave_a: 0.90,
+            long_wave_b: 0.10,
+            long_wave_a1: 0.34,
+            long_wave_b1: -0.139,
+            cloud_fact_ac: 1.35,
+            cloud_fact_bc: -0.35,
+            wind_height: 200.0,
+            temp_height: 200.0,
+            i_radiation: 1, // Solar Radiation default as shown in dialog
+            i_sun_sh: 3,     // Solar Radiation cloudiness default as shown in dialog
+            i_rel_hum: 0,
+            hargreaves: false,
+            i_crop: 1,
+            crop_height: 0.0,
+            albedo: 0.23,
+            i_lai: 1,       // From Crop Height, Clipped Grass
+            lai: 0.0,
+            r_extinct: 0.463,
+            records: vec![],
+        }
     }
 }

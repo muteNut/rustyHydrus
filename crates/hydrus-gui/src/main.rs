@@ -26,6 +26,7 @@ pub enum Page {
     SoilParams,
     WaterBc,
     Atmosphere,
+	Meteo,
     RootUptake,
     SoluteGeneral,
     SoluteMaterials,
@@ -419,6 +420,9 @@ impl App {
                     (Page::WaterBc, "Water flow: boundary conditions"),
                     (Page::Atmosphere, "Atmospheric data"),
                 ];
+				if self.prj.atmosphere.meteo.is_some() {
+					items.push((Page::Meteo, "Meteorological parameters"));
+				}
                 if pr.root_water_uptake {
                     items.push((Page::RootUptake, "Root water uptake"));
                 }
@@ -503,6 +507,7 @@ impl App {
             Page::SoilParams => self.page_soil(ui, &mut ch),
             Page::WaterBc => self.page_waterbc(ui, &mut ch),
             Page::Atmosphere => self.page_atmosphere(ui, &mut ch),
+			Page::Meteo => self.page_meteo(ui, &mut ch),
             Page::RootUptake => self.page_root(ui, &mut ch),
             Page::SoluteGeneral => self.page_sol_general(ui, &mut ch),
             Page::SoluteMaterials => self.page_sol_materials(ui, &mut ch),
