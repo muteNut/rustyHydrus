@@ -15,9 +15,27 @@ impl Simulation {
             - (self.th_new[m] - self.th_old[m]) * dxn / 2.0 / dt
             - self.sink[m] * dxn / 2.0;
         let dx1 = self.x[1] - self.x[0];
-        let v_b = -(self.con[0] + self.con[1]) / 2.0 * ((self.h_new[1] - self.h_new[0]) / dx1 + grav)
+        let mut v_b = -(self.con[0] + self.con[1]) / 2.0 * ((self.h_new[1] - self.h_new[0]) / dx1 + grav)
             + (self.th_new[0] - self.th_old[0]) * dx1 / 2.0 / dt
             + self.sink[0] * dx1 / 2.0;
+
+        let mut v_t = v_t;
+        if self.i_dual_por > 0 {
+            v_t -= self.sink_im[m] * dxn / 2.0;
+        }
+        if self.prj.water.l_w_dep {
+            v_t -= (self.con_lt[m] + self.con_lt[m - 1]) / 2.0 * (self.temp(m) - self.temp(m - 1)) / dxn;
+            v_b -= (self.con_lt[0] + self.con_lt[1]) / 2.0 * (self.temp(1) - self.temp(0)) / dx1;
+        }
+        if self.l_vapor {
+            v_t -= (self.con_vh[m] + self.con_vh[m - 1]) / 2.0 * (self.h_new[m] - self.h_new[m - 1]) / dxn
+                + (self.con_vt[m] + self.con_vt[m - 1]) / 2.0 * (self.temp(m) - self.temp(m - 1)) / dxn
+                + (self.th_v_new[m] - self.th_v_old[m]) * dxn / 2.0 / dt;
+            v_b -= (self.con_vh[0] + self.con_vh[1]) / 2.0 * (self.h_new[1] - self.h_new[0]) / dx1
+                + (self.con_vt[0] + self.con_vt[1]) / 2.0 * (self.temp(1) - self.temp(0)) / dx1
+                - (self.th_v_new[0] - self.th_v_old[0]) * dx1 / 2.0 / dt;
+        }
+
         self.v_top = v_t;
         self.v_bot = v_b;
         let mut run_off = 0.0;
@@ -64,7 +82,15 @@ impl Simulation {
         }
         let mut volume = 0.0;
         for i in 0..n - 1 {
-            volume += (self.x[i + 1] - self.x[i]) * (self.th_new[i] + self.th_new[i + 1]) / 2.0;
+            let dx = self.x[i + 1] - self.x[i];
+            let mut v = dx * (self.th_new[i] + self.th_new[i + 1]) / 2.0;
+            if self.l_vapor {
+                v += dx * (self.th_v_new[i] + self.th_v_new[i + 1]) / 2.0;
+            }
+            if self.i_dual_por > 0 {
+                v += dx * (self.th_new_im[i] + self.th_new_im[i + 1]) / 2.0;
+            }
+            volume += v;
         }
         let rec = TLevel {
             tlevel: self.t_level,
@@ -140,7 +166,7 @@ impl Simulation {
                 let dxb = self.x[i] - self.x[i - 1];
                 let va = -(self.con[i] + self.con[i + 1]) / 2.0 * ((self.h_new[i + 1] - self.h_new[i]) / dxa + grav);
                 let vb = -(self.con[i] + self.con[i - 1]) / 2.0 * ((self.h_new[i] - self.h_new[i - 1]) / dxb + grav);
-                vi = (va * dxb + vb * dxa) / (dxa + dxb);
+                vi = (va * dxa + vb * dxb) / (dxa + dxb);
             }
 
             let sorb2 = (0..ns).map(|j| {
@@ -160,7 +186,11 @@ impl Simulation {
                 None
             };
 			
-			let theta_val = if t <= self.t_init + 1e-12 { self.th_old[i] } else { self.th_new[i] };
+			let theta_val = if (t - self.t_init).abs() < 1e-6 {
+				self.th_old[i]
+			} else {
+				self.th_new[i]
+			};
             nodes.push(NodeOut {
                 node: n - i,
                 depth: self.x[n - 1] - self.x[i],
@@ -254,8 +284,17 @@ impl Simulation {
             sub[lay].area += dx;
             a_tot += dx;
             let he = (self.h_new[i] + self.h_new[j]) / 2.0;
-            let vnew = dx * (self.th_new[i] + self.th_new[j]) / 2.0;
-            let vold = dx * (self.th_old[i] + self.th_old[j]) / 2.0;
+            let mut vnew = dx * (self.th_new[i] + self.th_new[j]) / 2.0;
+            let mut vold = dx * (self.th_old[i] + self.th_old[j]) / 2.0;
+
+            if self.l_vapor {
+                vnew += dx * (self.th_v_new[i] + self.th_v_new[j]) / 2.0;
+                vold += dx * (self.th_v_old[i] + self.th_v_old[j]) / 2.0;
+            }
+            if self.i_dual_por > 0 {
+                vnew += dx * (self.th_new_im[i] + self.th_new_im[j]) / 2.0;
+                vold += dx * (self.th_old_im[i] + self.th_old_im[j]) / 2.0;
+            }
             tot.volume += vnew;
             tot.change += (vnew - vold) / dt;
             sub[lay].change += (vnew - vold) / dt;

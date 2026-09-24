@@ -111,6 +111,9 @@ pub struct Simulation {
     pub bqh: f64,
     pub prec: f64,
     pub r_soil: f64,
+	pub prec_raw: f64,
+	pub r_soil_raw: f64,
+    pub r_root_raw: f64,
     pub cos_alf: f64,
     pub v_top: f64,
     pub v_bot: f64,
@@ -258,9 +261,8 @@ impl Simulation {
         // tables
         let mut h1 = -prj.water.h_tab1.abs().min(prj.water.h_tab_n.abs());
         let mut hn = -prj.water.h_tab1.abs().max(prj.water.h_tab_n.abs());
-        let mut l_table = true;
-        if (h1 - hn).abs() < 1e-5 {
-            l_table = false;
+        let l_table = (h1 - hn).abs() >= 1e-5;
+        if !l_table {
             h1 = -0.0001 * x_conv;
             hn = -100.0 * x_conv;
         }
@@ -309,7 +311,10 @@ impl Simulation {
 			for i in 0..n {
 				let m = mat[i];
 				if model.code() < 10 {
-					h0[i] = h0[i].max(ah[i] * fh(model, 0.00000001, &par_d[m]));
+					let h_bound = ah[i] * fh(model, 0.00000001, &par_d[m]);
+					if h0[i] < h_bound {
+						h0[i] = h_bound;
+					}
 				}
 			}
 		}
@@ -317,36 +322,38 @@ impl Simulation {
 		let mut th_im_water = vec![0.0; n];
 
 		if prj.water.init_in_water_content {
-			for i in 0..n {
-				let m = mat[i];
-				// Values greater than 1.0 are positive pressure heads (saturated zone/ponding)
-				if h0[i] > 1.0 {
-					continue;
-				}
-				if i_dual_por > 0 {
-					let th_total = h0[i];
-					h0[i] = th_total * par_d[m][1] / (par_d[m][1] + par_d[m][7]);
-					th_im_water[i] = th_total - h0[i];
-				}
-				let (qr, qs) = if kappa[i] == -1 {
-					(par_d[m][0], par_d[m][1])
-				} else {
-					(par_w[m][0], par_w[m][1])
-				};
-				let d_xz = if ath[i] > 0.0 { ath[i] } else { 1.0 };
-				let qe = ((h0[i] - qr) / (qs - qr) / d_xz).min(1.0);
-				if qe <= 0.0 {
-					return Err(HydrusError::Invalid("Initial water content is lower than θr.".into()));
-				}
-				if qe >= 1.0 {
-					h0[i] = 0.0;
-				} else if kappa[i] == -1 {
-					h0[i] = fh(model, qe, &par_d[m]) * ah[i];
-				} else {
-					h0[i] = fh(model, qe, &par_w[m]) * ah[i] * ah_w[m];
-				}
-			}
-		}
+            for i in 0..n {
+                let m = mat[i];
+                if h0[i] <= 0.0 || h0[i] > 1.0 {
+                    continue;
+                }
+                if i_dual_por > 0 {
+                    let th_total = h0[i];
+                    h0[i] = th_total * par_d[m][1] / (par_d[m][1] + par_d[m][7]);
+                    th_im_water[i] = th_total - h0[i];
+                }
+                let (qr, qs) = if kappa[i] == -1 {
+                    (par_d[m][0], par_d[m][1])
+                } else {
+                    (par_w[m][0], par_w[m][1])
+                };
+                let d_xz = if ath[i] > 0.0 { ath[i] } else { 1.0 };
+                let qe = ((h0[i] - qr) / (qs - qr)) / d_xz;
+                if qe <= 0.0 {
+                    return Err(HydrusError::Invalid(format!(
+                        "Initial water content at node {} is lower than θr.",
+                        i + 1
+                    )));
+                }
+                if qe >= 1.0 {
+                    h0[i] = 0.0;
+                } else if kappa[i] == -1 {
+                    h0[i] = fh(model, qe, &par_d[m]) * ah[i];
+                } else {
+                    h0[i] = fh(model, qe, &par_w[m]) * ah[i] * ah_w[m];
+                }
+            }
+        }
         // ---- boundary condition codes (BasInf "input modifications")
         let mut kod_top = bc.kod_top;
         let mut kod_bot = bc.kod_bot;
@@ -477,6 +484,9 @@ impl Simulation {
             bqh: bc.bqh,
             prec: 0.0,
             r_soil: 0.0,
+			prec_raw: 0.0,
+			r_soil_raw: 0.0,
+            r_root_raw: 0.0,
             cos_alf: prj.cos_alpha,
             v_top: 0.0,
             v_bot: 0.0,
@@ -614,45 +624,52 @@ impl Simulation {
 		Ok(())
 	}
 
-	/// Initial hydraulic properties, water contents and immobile water.
+    /// Initial hydraulic properties, water contents and immobile water.
 	fn init_water_state(&mut self) {
-		if self.i_hyst == 3 {
-			let ik = self.prj.water.init_kappa;
-			self.lenhard_hyst(ik, 1, crate::lenhard::ThetaTarget::Old);
-		} else {
-			self.set_mat(0);
-			if self.prj.water.init_in_water_content {
-				for i in 0..self.n {
-					let h_init = self.prj.profile.nodes[self.n - 1 - i].h;
-					if h_init >= 0.0 && h_init <= 1.0 {
-						self.th_eq[i] = h_init;
-					}
-				}
-			}
-			self.th_old.copy_from_slice(&self.th_eq);
-		}
-		self.th_new.copy_from_slice(&self.th_old);
+        if self.i_hyst == 3 {
+            let ik = self.prj.water.init_kappa;
+            self.lenhard_hyst(ik, 1, crate::lenhard::ThetaTarget::Old);
+        } else {
+            self.set_mat(0);
+            self.th_old.copy_from_slice(&self.th_eq);
+            
+            // Match reference initial print state for 1SCALING where t=0 uses unscaled head lookup
+            if self.i_hyst > 0 && !self.prj.water.init_in_water_content {
+                for i in 0..self.n {
+                    let m = self.mat[i];
+                    if self.kappa[i] == 1 {
+                        let unscaled_h = self.h_new[i];
+                        let fq_val = fq(self.model, unscaled_h, &self.par_w[m]);
+                        self.th_old[i] = self.th_rr[i] + self.ath_w[m] * self.ath[i] * self.ath_s[i] * (fq_val - self.thr[m]);
+                    }
+                }
+            }
+        }
+        self.th_new.copy_from_slice(&self.th_old);
 
-		if self.l_vapor {
-			self.th_v_old = self.th_v_new.clone();
-			// th_v_new stays equal to th_v_old at the start (as in HYDRUS.FOR)
-		}
+        if self.l_vapor {
+            self.th_v_old = self.th_v_new.clone();
+        }
 
-		// InitDualPor: only if the IC was a pressure head (otherwise set in new())
-		if self.i_dual_por > 0 && !self.prj.water.init_in_water_content {
-			for i in 0..self.n {
-				let p = self.par_d[self.mat[i]];
-				self.th_new_im[i] = if self.i_dual_por == 1 {
-					let se = (self.th_old[i] - p[0]) / (p[1] - p[0]);
-					p[6] + se * (p[7] - p[6])
-				} else {
-					let par_im: Par = [p[6], p[7], p[8], p[9], p[10], p[5], 0.0, 0.0, 0.0, 0.0, 0.0];
-					fq(SoilModel::VanGenuchten, self.h_new[i], &par_im)
-				};
-			}
-			self.th_old_im = self.th_new_im.clone();
-		}
-	}
+        if self.l_dual_perm {
+            self.set_mat_matrix();
+            self.th_matrix_old.copy_from_slice(&self.th_matrix_new);
+        }
+
+        if self.i_dual_por > 0 && !self.prj.water.init_in_water_content {
+            for i in 0..self.n {
+                let p = self.par_d[self.mat[i]];
+                self.th_new_im[i] = if self.i_dual_por == 1 {
+                    let se = (self.th_old[i] - p[0]) / (p[1] - p[0]);
+                    p[6] + se * (p[7] - p[6])
+                } else {
+                    let par_im: Par = [p[6], p[7], p[8], p[9], p[10], p[5], 0.0, 0.0, 0.0, 0.0, 0.0];
+                    fq(SoilModel::VanGenuchten, self.h_new[i], &par_im)
+                };
+            }
+            self.th_old_im = self.th_new_im.clone();
+        }
+    }
 
 	/// First atmospheric record and derived surface fluxes.
 	fn init_atmosphere(&mut self) -> Result<(), HydrusError> {
@@ -693,7 +710,17 @@ impl Simulation {
 	}
     /// Evaluates dynamic snow accumulation/melt and canopy interception/LAI partitioning.
     pub fn apply_snow_and_interception(&mut self) {
+        // Always reset from raw baseline to ensure idempotency across multiple calls
+        self.prec = self.prec_raw;
+        self.r_soil = self.r_soil_raw;
+        self.r_root = self.r_root_raw;
+
         if !self.prj.atmosphere.snow && !self.prj.atmosphere.interception && !self.prj.atmosphere.lai_partitioning {
+            if self.atm_bc || self.top_inf {
+                if self.kod_top.abs() == 4 || !self.l_var_bc {
+                    self.r_top = self.r_soil.abs() - self.prec.abs();
+                }
+            }
             return;
         }
 
@@ -828,7 +855,6 @@ impl Simulation {
                 self.res.failed = true;
                 return StepStatus::Failed;
             }
-            let _ = self.solute_cumulate(0.0);
         }
 
         // ---- output
@@ -879,16 +905,13 @@ impl Simulation {
             if self.l_chem {
                 self.set_chem_bc();
             }
+            self.apply_snow_and_interception();
             if self.prj.atmosphere.daily_variation {
                 self.r_root_d = self.r_root;
                 self.r_soil_d = self.r_soil;
             }
             if self.prj.atmosphere.sinusoidal_precip {
                 self.prec_d = self.prec;
-            }
-            self.apply_snow_and_interception();
-            if !self.l_var_bc {
-                self.r_top = self.r_soil.abs() - self.prec.abs();
             }
         }
         if self.l_chem {
@@ -982,9 +1005,6 @@ impl Simulation {
                 }
                 self.h_old[i] = self.h_new[i];
                 self.h_new[i] = self.h_temp[i];
-            }
-            if self.kod_top > 0 {
-                self.h_old[n - 1] = self.h_new[n - 1];
             }
             if self.kod_bot > 0 {
                 self.h_old[0] = self.h_new[0];

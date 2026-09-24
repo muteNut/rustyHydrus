@@ -591,7 +591,7 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
 fn read_profile(path: &Path, prj: &mut Project, l_chem: bool, l_temp: bool, l_equil: bool) -> R<(usize, usize)> {
     let mut p = Rd::open(path, "Profile.dat")?;
     let _ver = p.version();
-    let nhead = p.read(1)?.i(0)?;
+    let nhead = p.read(1)?.i(0)? as usize;
     for _ in 0..nhead {
         p.skip()?;
     }
@@ -600,6 +600,21 @@ fn read_profile(path: &Path, prj: &mut Project, l_chem: bool, l_temp: bool, l_eq
     let ns = t.i(2)?.max(0) as usize;
     if num_np > 1001 {
         return perr("Profile.dat: more than 1001 nodes");
+    }
+    // Discard any remaining tokens on the header line (e.g. column titles: x, h, Mat...)
+    while p.pos < p.lines.len() {
+        let l = p.lines[p.pos].trim();
+        if l.is_empty() {
+            p.pos += 1;
+            continue;
+        }
+        // First token must be node number 1
+        if let Some(first) = l.split_whitespace().next() {
+            if first.parse::<usize>().map(|v| v == 1).unwrap_or(false) {
+                break;
+            }
+        }
+        p.pos += 1;
     }
     let ns_eff = if l_chem { ns } else { 0 };
     // read node lines, keeping the file order (top -> bottom) and interpolating skipped nodes
@@ -704,9 +719,9 @@ fn read_profile(path: &Path, prj: &mut Project, l_chem: bool, l_temp: bool, l_eq
                 mat: r.m.max(1),
                 layer: r.l.max(1),
                 beta: r.b,
-                ah: r.ax,
-                ak: r.bx,
-                ath: r.dx,
+                ah: if r.ax > 0.0 { r.ax } else { 1.0 },
+                ak: if r.bx > 0.0 { r.bx } else { 1.0 },
+                ath: if r.dx > 0.0 { r.dx } else { 1.0 },
                 temp: r.te,
                 conc: r.c,
                 sorb: r.s,

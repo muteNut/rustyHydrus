@@ -156,7 +156,7 @@ impl Simulation {
             let q_min = qr_m.min(qs_m);
             let q_max = qr_m.max(qs_m);
             self.th_matrix_new[i] = fq(SoilModel::VanGenuchten, hm, &par_m).clamp(q_min, q_max);
-            if self.th_matrix_old[i] == 0.0 {
+            if (self.h_matrix_new[i] - self.h_matrix_old[i]).abs() < 1e-12 {
                 self.th_matrix_old[i] = self.th_matrix_new[i];
             }
         }
@@ -270,23 +270,37 @@ impl Simulation {
         let model = self.model;
         for i in 0..self.n {
             let m = self.mat[i];
-            
-            // In WATFLOW.FOR: Effective scaling factor A = ah(i) * (if kappa == 1 { ahW(m) } else { 1.0 })
-            // However, when individual nodal scaling is active (ah != 1.0), ah already incorporates the scaling.
-            let a_scale = if self.kappa[i] == 1 && (self.ah[i] - 1.0).abs() < 1e-5 {
+
+            // Temperature dependence of surface tension (AT) and viscosity (BT)
+            let (at, bt) = if self.prj.water.l_w_dep {
+                let tt = self.temp(i);
+                let tr = 20.0;
+                let at_val = (75.6 - 0.1425 * tt - 2.38e-4 * tt * tt)
+                    / (75.6 - 0.1425 * tr - 2.38e-4 * tr * tr);
+                let bt_val = ((1.787 - 0.007 * tr) / (1.0 + 0.03225 * tr))
+                    / ((1.787 - 0.007 * tt) / (1.0 + 0.03225 * tt))
+                    * (1.0 - 7.37e-6 * (tt - 4.0).powi(2) + 3.79e-8 * (tt - 4.0).powi(3))
+                    / (1.0 - 7.37e-6 * (tr - 4.0).powi(2) + 3.79e-8 * (tr - 4.0).powi(3));
+                (at_val, bt_val)
+            } else {
+                (1.0, 1.0)
+            };
+
+            // Fortran SetMat: compound AhW on the wetting branch regardless of Ah(i)
+            let a_scale = if self.kappa[i] == 1 {
                 self.ah[i] * self.ah_w[m]
             } else {
                 self.ah[i]
             };
 
-            let hi1 = self.h_sat[m].min(self.h_temp[i] / a_scale);
-            let hi2 = self.h_sat[m].min(self.h_new[i] / a_scale);
+            let hi1 = self.h_sat[m].min(self.h_temp[i] / a_scale / at);
+            let hi2 = self.h_sat[m].min(self.h_new[i] / a_scale / at);
             let him = 0.1 * hi1 + 0.9 * hi2;
-			
+
             if self.model == SoilModel::Tabular {
                 let (coni, capi, thei) = self.lookup_tabular(m, him);
-                self.con[i] = coni * self.ak[i] * self.ak_s[i];
-                self.cap[i] = capi * self.ath[i] * self.ath_s[i];
+                self.con[i] = coni * self.ak[i] * bt * self.ak_s[i];
+                self.cap[i] = capi * self.ath[i] * self.ath_s[i] / self.ah[i] / at;
                 self.th_eq[i] = thei * self.ath[i] * self.ath_s[i];
                 if iter == 0 {
                     self.con_o[i] = self.con[i];
@@ -308,32 +322,30 @@ impl Simulation {
             if him >= self.h_sat[m] {
                 capi = 0.0;
                 thei = self.ths[m];
-            } else if let Some((it, dh)) = self.lookup(m, him) {
-                let tb = &self.tabs[m];
-                capi = tb.cap[it] + (tb.cap[it + 1] - tb.cap[it]) * dh;
-                thei = tb.the[it] + (tb.the[it + 1] - tb.the[it]) * dh;
+            } else if self.l_table {
+                if let Some((it, dh)) = self.lookup(m, him) {
+                    let tb = &self.tabs[m];
+                    capi = tb.cap[it] + (tb.cap[it + 1] - tb.cap[it]) * dh;
+                    thei = tb.the[it] + (tb.the[it + 1] - tb.the[it]) * dh;
+                } else {
+                    capi = fc(model, him, &self.par_d[m]);
+                    thei = fq(model, him, &self.par_d[m]);
+                }
             } else {
                 capi = fc(model, him, &self.par_d[m]);
                 thei = fq(model, him, &self.par_d[m]);
             }
+			
 
-            let (at, bt) = (1.0, 1.0);
             if self.kappa[i] == -1 {
+                // Drying branch
                 self.con[i] = coni * self.ak[i] * bt * self.ak_s[i];
                 self.cap[i] = capi * self.ath[i] * self.ath_s[i] / self.ah[i] / at;
                 self.th_eq[i] = self.thr[m] + (thei - self.thr[m]) * self.ath[i] * self.ath_s[i];
             } else {
-                // When individual nodal scaling is active, Dxz is already scaled.
-                let d_scale = if (self.ath[i] - 1.0).abs() < 1e-5 {
-                    self.ath_w[m] * self.ath[i]
-                } else {
-                    self.ath[i]
-                };
-                let k_scale = if (self.ak[i] - 1.0).abs() < 1e-5 {
-                    self.ak_w[m] * self.ak[i]
-                } else {
-                    self.ak[i]
-                };
+                // Wetting branch: compound AThW and AKW unconditionally
+                let d_scale = self.ath_w[m] * self.ath[i];
+                let k_scale = self.ak_w[m] * self.ak[i];
 
                 self.con[i] = self.con_r[i] + coni * k_scale * bt * self.ak_s[i];
                 self.cap[i] = capi * d_scale * self.ath_s[i] / a_scale / at;
@@ -343,6 +355,7 @@ impl Simulation {
                 self.con_o[i] = self.con[i];
             }
         }
+		
 		if self.l_vapor || self.prj.water.l_w_dep {
             let temps: Vec<f64> = (0..self.n).map(|i| self.temp(i)).collect();
             crate::vapor::con_vapor(
@@ -817,7 +830,7 @@ impl Simulation {
         }
     }
 
-    /// Solve the Richards equation for one time step (WatFlow in Fortran).
+	/// Solve the Richards equation for one time step (WatFlow in Fortran).
     pub fn wat_flow(&mut self) {
         let n = self.n;
         let rmax = 1e10;
@@ -825,19 +838,28 @@ impl Simulation {
         'outer: loop {
             self.iter_w = 0;
             self.convg = true;
-			if self.i_dual_por > 0 {
+            if self.i_dual_por > 0 {
                 self.dual_por();
             }
             if self.l_dual_perm {
                 self.dual_perm();
             }
-            if self.w_layer && self.h_new[n - 1] > 0.0 && self.h_new[n - 1] < 0.00005 * self.x_conv && self.r_top >= 0.0 {
+            if self.w_layer
+                && self.h_new[n - 1] > 0.0
+                && self.h_new[n - 1] < 0.00005 * self.x_conv
+                && self.r_top >= 0.0
+            {
                 let m = self.mat[n - 1];
                 let hh = fh(self.model, 0.9999, &self.par_d[m]);
                 self.h_new[n - 1] = hh;
                 self.h_old[n - 1] = hh;
                 self.h_temp[n - 1] = hh;
             }
+            let mut h_m_temp = if self.l_dual_perm {
+                self.h_matrix_new.clone()
+            } else {
+                Vec::new()
+            };
             loop {
                 if self.i_hyst == 3 {
                     self.lenhard_hyst(0, 2, crate::lenhard::ThetaTarget::Eq);
@@ -848,10 +870,11 @@ impl Simulation {
                     }
                 }
                 let sys = self.build_system();
-				self.shift();
-				self.h_temp.copy_from_slice(&self.h_new);
+                self.shift();
+                self.h_temp.copy_from_slice(&self.h_new);
                 self.solve(&sys);
-				if self.l_dual_perm {
+                if self.l_dual_perm {
+                    h_m_temp.copy_from_slice(&self.h_matrix_new);
                     self.set_mat_matrix();
                     let sys_m = self.build_matrix_system();
                     self.solve_matrix(&sys_m);
@@ -864,7 +887,11 @@ impl Simulation {
                     if self.kod_top.abs() == 4 && self.h_new[i] < self.h_crit_a && i == n - 1 {
                         self.h_new[i] = self.h_crit_a;
                     }
-                    if self.kod_top.abs() == 4 && self.h_new[i] < self.h_crit_a && (i as f64 + 1.0) > n as f64 * 9.0 / 10.0 && self.sink[i] <= 0.0 {
+                    if self.kod_top.abs() == 4
+                        && self.h_new[i] < self.h_crit_a
+                        && (i as f64 + 1.0) > n as f64 * 9.0 / 10.0
+                        && self.sink[i] <= 0.0
+                    {
                         self.h_new[i] = self.h_crit_a;
                     }
                 }
@@ -878,12 +905,17 @@ impl Simulation {
                     let mut eps_h = 0.0;
                     if self.h_temp[i] < self.h_sat[m] && self.h_new[i] < self.h_sat[m] {
                         let th = self.th_new[i]
-                            + self.cap[i] * (self.h_new[i] - self.h_temp[i]) / (self.ths[m] - self.thr[m]) / self.ath[i];
+                            + self.cap[i] * (self.h_new[i] - self.h_temp[i])
+                                / (self.ths[m] - self.thr[m])
+                                / self.ath[i];
                         eps_th = (self.th_new[i] - th).abs();
                     } else {
                         eps_h = (self.h_new[i] - self.h_temp[i]).abs();
                     }
-                    if eps_th > self.tol_th || eps_h > self.tol_h || self.h_new[i].abs() > rmax * 0.999 {
+                    if eps_th > self.tol_th
+                        || eps_h > self.tol_h
+                        || self.h_new[i].abs() > rmax * 0.999
+                    {
                         it_crit = false;
                         if self.h_new[i].abs() > rmax * 0.999 {
                             self.iter_w = self.max_it;
@@ -904,6 +936,9 @@ impl Simulation {
                             }
                             self.h_new[i] = self.h_old[i];
                             self.h_temp[i] = self.h_old[i];
+                            if self.l_dual_perm {
+                                self.h_matrix_new[i] = self.h_matrix_old[i];
+                            }
                             if let Some(h) = self.heat.as_mut() {
                                 h.temp_n[i] = h.temp_o[i];
                             }
@@ -932,7 +967,8 @@ impl Simulation {
                     };
                     let q_min = qr_m.min(qs_m);
                     let q_max = qr_m.max(qs_m);
-                    self.th_matrix_new[i] = (self.th_matrix_new[i] + self.cap_matrix[i] * (self.h_matrix_new[i] - self.h_matrix_old[i]))
+                    self.th_matrix_new[i] = (self.th_matrix_new[i]
+                        + self.cap_matrix[i] * (self.h_matrix_new[i] - h_m_temp[i]))
                         .clamp(q_min, q_max);
                 }
             }

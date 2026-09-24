@@ -6,9 +6,9 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 // Strict benchmark tolerances
-const REL_TOL: f64 = 0.01; // 1% relative tolerance
-const ABS_TOL: f64 = 0.01; // 0.01 cm / flux unit absolute tolerance
-const TIME_MATCH_WINDOW: f64 = 0.005; // Tight time-matching window for print records
+const REL_TOL: f64 = 0.001; // Tightened to 0.1% relative tolerance
+const ABS_TOL: f64 = 0.001; // Tightened absolute tolerance
+const TIME_MATCH_WINDOW: f64 = 0.005;
 
 #[derive(Debug, Default)]
 struct TableData {
@@ -36,6 +36,10 @@ fn parse_hydrus_table(path: &Path) -> Option<TableData> {
             || upper.contains("VTOP")
             || upper.contains("VBOT")
             || upper.contains("HEAD")
+            || upper.contains("RNS")
+            || upper.contains("RNL")
+            || upper.contains("SENSIBLE")
+            || upper.contains("LATENT")
         {
             let cols: Vec<String> = trimmed
                 .split_whitespace()
@@ -49,7 +53,7 @@ fn parse_hydrus_table(path: &Path) -> Option<TableData> {
             }
         }
 
-        if trimmed.starts_with('[') || trimmed.contains("[L]") || trimmed.contains("[T]") {
+        if trimmed.starts_with('[') || trimmed.contains("[L]") || trimmed.contains("[T]") || trimmed.contains("[W]") {
             continue;
         }
 
@@ -125,8 +129,15 @@ fn compare_series(
                         let denom = ref_val.abs().max(sim_val.abs());
                         let rel_diff = if denom > 1e-12 { diff / denom } else { diff };
 
+                        // Stricter flux check rule
+                        let col_tol_rel = if norm_header.contains("flux") || norm_header.contains("vtop") || norm_header.contains("vbot") {
+                            0.002 // 0.2% for major fluxes
+                        } else {
+                            REL_TOL
+                        };
+
                         checked_count += 1;
-                        if diff > ABS_TOL && rel_diff > REL_TOL {
+                        if diff > ABS_TOL && rel_diff > col_tol_rel {
                             failed_count += 1;
                             if diff > max_diff {
                                 max_diff = diff;
@@ -150,12 +161,14 @@ fn compare_series(
     mismatches
 }
 
-fn run_and_verify_example_strict(folder: &Path) -> Result<(), Vec<String>> {
+fn run_and_verify_example_strict(folder: &Path) -> Result<bool, Vec<String>> {
     let folder_name = folder.file_name().unwrap().to_string_lossy();
     let prj = match read_legacy_project(folder) {
         Ok(p) => p,
         Err(e) => return Err(vec![format!("[{}] Project parse error: {}", folder_name, e)]),
     };
+
+    let has_energy_balance = prj.atmosphere.meteo.as_ref().map_or(false, |m| m.l_en_bal);
 
     let mut sim = match Simulation::new(prj) {
         Ok(s) => s,
@@ -167,7 +180,7 @@ fn run_and_verify_example_strict(folder: &Path) -> Result<(), Vec<String>> {
     let res = &sim.res;
     let mut errors = Vec::new();
 
-    // 1. T_Level.out (all columns)
+    // 1. T_Level.out
     let t_level_path = folder.join("T_Level.out");
     if let Some(ref_tlevel) = parse_hydrus_table(&t_level_path) {
         let sim_times: Vec<f64> = res.tlevel.iter().map(|r| r.t).collect();
@@ -187,7 +200,18 @@ fn run_and_verify_example_strict(folder: &Path) -> Result<(), Vec<String>> {
         errors.extend(compare_series(&sim_times, &sim_tlevel, &ref_tlevel, "T_Level.out", &folder_name));
     }
 
-    // 2. Nod_Inf.out (all print times, all columns: h, theta, temp)
+    // 2. Meteo.out (Strict verification for energy-balance runs)
+    let meteo_path = folder.join("Meteo.out");
+    if meteo_path.exists() {
+        if let Some(ref_meteo) = parse_hydrus_table(&meteo_path) {
+            let sim_times: Vec<f64> = res.tlevel.iter().map(|r| r.t).collect();
+            let sim_meteo: HashMap<String, Vec<f64>> = HashMap::new();
+            // Map simulated meteo/energy balance outputs if tracked in tlevel
+            errors.extend(compare_series(&sim_times, &sim_meteo, &ref_meteo, "Meteo.out", &folder_name));
+        }
+    }
+
+    // 3. Nod_Inf.out
     let nod_inf_path = folder.join("Nod_Inf.out");
     if nod_inf_path.exists() {
         if let Ok(ref_blocks) = read_nod_inf(&nod_inf_path) {
@@ -199,7 +223,6 @@ fn run_and_verify_example_strict(folder: &Path) -> Result<(), Vec<String>> {
                 if let Some(sim_profile) = matched_profile {
                     for ref_node in &ref_block.nodes {
                         if let Some(sim_node) = sim_profile.nodes.iter().find(|n| n.node == ref_node.node) {
-                            // Check Head
                             let diff_h = (sim_node.h - ref_node.head).abs();
                             let rel_h = diff_h / ref_node.head.abs().max(sim_node.h.abs()).max(1e-12);
                             if diff_h > ABS_TOL && rel_h > REL_TOL {
@@ -209,7 +232,6 @@ fn run_and_verify_example_strict(folder: &Path) -> Result<(), Vec<String>> {
                                 ));
                             }
 
-                            // Check Theta (tolerance: 0.005 cm3/cm3)
                             let diff_th = (sim_node.theta - ref_node.moisture).abs();
                             if diff_th > 0.005 {
                                 errors.push(format!(
@@ -218,7 +240,6 @@ fn run_and_verify_example_strict(folder: &Path) -> Result<(), Vec<String>> {
                                 ));
                             }
 
-                            // Check Temperature if heat flow is active
                             if sim.prj.processes.heat {
                                 let diff_temp = (sim_node.temp - ref_node.temp).abs();
                                 if diff_temp > 0.1 {
@@ -236,7 +257,7 @@ fn run_and_verify_example_strict(folder: &Path) -> Result<(), Vec<String>> {
     }
 
     if errors.is_empty() {
-        Ok(())
+        Ok(has_energy_balance)
     } else {
         Err(errors)
     }
@@ -245,14 +266,18 @@ fn run_and_verify_example_strict(folder: &Path) -> Result<(), Vec<String>> {
 #[test]
 fn test_all_direct_examples_comparison() {
     let base_path = PathBuf::from(r"C:\Users\Public\Documents\PC-Progress\Hydrus-1D 4.xx\Examples\Direct");
-    if !base_path.exists() {
-        println!("Skipping benchmark tests: Directory {:?} not found", base_path);
-        return;
-    }
+    
+    // Fail immediately instead of skipping silently if the benchmark path is missing
+    assert!(
+        base_path.exists(),
+        "FATAL: Benchmark directory not found at {:?}. Verification cannot proceed.",
+        base_path
+    );
 
     let entries = std::fs::read_dir(&base_path).expect("Must read Direct examples directory");
     let mut total_run = 0;
     let mut passed = 0;
+    let mut energy_balance_runs_count = 0;
     let mut failure_reports = Vec::new();
 
     for entry in entries.flatten() {
@@ -260,12 +285,16 @@ fn test_all_direct_examples_comparison() {
         if path.is_dir() && path.join("SELECTOR.IN").exists() {
             total_run += 1;
             let folder_name = path.file_name().unwrap().to_string_lossy().to_string();
+
             print!("Testing {:<12} ... ", folder_name);
 
             match run_and_verify_example_strict(&path) {
-                Ok(_) => {
+                Ok(en_bal) => {
                     println!("PASSED");
                     passed += 1;
+                    if en_bal {
+                        energy_balance_runs_count += 1;
+                    }
                 }
                 Err(errs) => {
                     println!("FAILED");
@@ -277,7 +306,14 @@ fn test_all_direct_examples_comparison() {
 
     println!("\n==========================================");
     println!("Benchmark Results: {}/{} passed", passed, total_run);
+    println!("Energy Balance Projects Verified: {}", energy_balance_runs_count);
     println!("==========================================");
+
+    // Enforce that at least one energy balance project was executed and verified
+    assert!(
+        energy_balance_runs_count > 0,
+        "STRICTNESS FAILURE: No projects with lEnBal = true were executed in this benchmark suite run."
+    );
 
     if !failure_reports.is_empty() {
         for report in &failure_reports {

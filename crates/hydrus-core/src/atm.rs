@@ -51,33 +51,26 @@ impl Simulation {
             self.t_atm1 = rec.t;
         }
 
-        self.prec = rec.prec;
-        let mut r_r = rec.transp;
-        self.r_soil = rec.evap;
-        if self.prj.atmosphere.lai_partitioning && self.prj.atmosphere.meteo.is_none() {
-            let r_lai = r_r;
-            let r_pet = self.r_soil;
-            r_r = 0.0;
-            if r_lai > 0.0 {
-                r_r = r_pet * (1.0 - (-self.prj.atmosphere.extinction.max(0.1) * r_lai).exp()).max(0.0);
-            }
-            self.r_soil = r_pet - r_r;
-        }
-        let hca = rec.h_crit_a;
+        // Store raw baseline values
+        self.prec_raw = rec.prec;
+        self.r_soil_raw = rec.evap;
+        self.r_root_raw = rec.transp.abs();
+
         if self.prj.atmosphere.has_root_depth {
             self.x_root = rec.x_root;
         }
         self.atm_record_scalars(&rec);
-		
+
         if self.top_inf {
             let r_top_old = self.r_top;
-            self.h_crit_a = -hca.abs();
+            self.h_crit_a = -rec.h_crit_a.abs();
             if self.l_var_bc {
+                self.prec = self.prec_raw;
                 self.r_top = self.prec;
                 if (r_top_old - self.r_top).abs() > self.r_top.abs() * 0.2 && self.r_top < 0.0 {
                     self.min_step = true;
                 }
-                self.kod_top = self.r_soil as i32;
+                self.kod_top = self.r_soil_raw as i32;
                 self.r_soil = 0.0;
                 if self.kod_top == -1 && kod_top_old == 1 && self.prec > 0.0 && self.h_new[n - 1] > 0.0 {
                     self.h_new[n - 1] = -0.01 * self.x_conv;
@@ -90,115 +83,56 @@ impl Simulation {
                     }
                 }
 
-                // Determine air temperature for snow accumulation/melting
-                let temp_air = if self.l_temp {
-                    rec.t_top
-                } else if let Some(ref mp) = self.prj.atmosphere.meteo {
-                    if let Some(m_rec) = mp.records.get(self.meteo_idx) {
-                        (m_rec.t_max + m_rec.t_min) / 2.0
-                    } else {
-                        rec.t_top
-                    }
-                } else {
-                    rec.t_top
-                };
-
-                // 1. Snow processing
-                if self.prj.atmosphere.snow {
-                    let mut c_top_dummy = vec![0.0; self.n_species()];
-                    let c_t_dummy = vec![0.0; self.n_species()];
-                    let (p_eff, s_layer, evap_eff, min_st) = crate::meteo::calculate_snow(
-                        self.prec,
-                        temp_air,
-                        self.t_atm1 - self.t_atm_old,
-                        self.prj.atmosphere.snow_mf,
-                        self.snow_layer,
-                        self.r_soil,
-                        self.x_conv,
-                        &mut c_top_dummy,
-                        &c_t_dummy,
-                    );
-                    self.prec = p_eff;
-                    self.snow_layer = s_layer;
-                    self.r_soil = evap_eff;
-                    if min_st {
-                        self.min_step = true;
-                    }
-                }
-
-                // 2. Potential ET / Surface Energy Balance from meteorological records
+                // If meteorological data is used, compute raw potential rates from meteo
                 if let Some(ref mp) = self.prj.atmosphere.meteo {
                     if let Some(m_rec) = mp.records.get(self.meteo_idx) {
                         if mp.l_en_bal {
-                            // Coupled surface energy balance (TIME.FOR subroutine Evapor)
-							let temp_s = if self.l_temp { self.temp(n - 1) } else { temp_air };
-							let h_top_val = self.h_new[n - 1];
-							let theta_top = self.th_new[n - 1];
+                            let temp_air = (m_rec.t_max + m_rec.t_min) / 2.0;
+                            let temp_s = if self.l_temp { self.temp(n - 1) } else { temp_air };
+                            let h_top_val = self.h_new[n - 1];
+                            let theta_top = self.th_new[n - 1];
                             let wind_ms = m_rec.wind_kmd / 86.4;
 
-                            let (evap_m_s, _heat_flux_w, _sens_flux, _evap_kg, _rv, _rs) =
-                                crate::meteo::surface_energy_balance(
-                                    temp_s,
-                                    temp_air,
-                                    m_rec.rh_mean,
-                                    m_rec.rad,
-                                    h_top_val,
-                                    theta_top,
-                                    wind_ms,
-                                    mp.wind_height,
-                                    mp.temp_height,
-                                    self.x_conv,
-                                );
+                            let cover = crate::meteo::cloud_cover(mp, m_rec, self.t_conv);
+							let (evap_m_s, heat_flux_w, _, _, _, _) = crate::meteo::surface_energy_balance(
+								temp_s,
+								temp_air,
+								m_rec.rh_mean,
+								m_rec.rad,
+								h_top_val,
+								theta_top,
+								cover,
+								wind_ms,
+								mp.wind_height,
+								mp.temp_height,
+								self.x_conv,
+							);
+                            self.r_soil_raw = evap_m_s * self.x_conv / self.t_conv;
+                            self.r_root_raw = 0.0;
 
-                            // Convert evaporation velocity [m/s] to simulation length/time units [L/T]
-                            let evap_rate = evap_m_s * self.x_conv / self.t_conv;
-                            self.r_soil = evap_rate;
-                            self.r_root = 0.0;
-
+                            // Feed conductive heat flux G [W/m2 -> energy unit / (L2 T)] back into Temper
                             if self.l_temp && self.prj.heat.k_top == -1 {
-                                self.prj.heat.t_top = temp_s;
+                                self.prj.heat.t_top = heat_flux_w * (self.x_conv * self.x_conv) / self.t_conv;
                             }
                         } else {
                             let (evap_p, trans_p) = crate::meteo::potential_et(mp, m_rec, self.t_conv);
                             let r_conv = 0.001 * self.x_conv;
                             let tt_conv = 24.0 * 3600.0 * self.t_conv;
-                            self.r_soil = evap_p * r_conv / tt_conv;
-                            self.r_root = trans_p * r_conv / tt_conv;
+                            self.r_soil_raw = evap_p * r_conv / tt_conv;
+                            self.r_root_raw = trans_p * r_conv / tt_conv;
                         }
 
-                        // Dynamic daily rooting depth (iCrop == 3)
                         if let Some(xr) = m_rec.x_root {
                             self.x_root = xr;
                         }
                     }
                 }
 
-                // 3. Canopy Interception
-                if self.prj.atmosphere.interception {
-                    let lai = if let Some(ref mp) = self.prj.atmosphere.meteo {
-                        if let Some(m_rec) = mp.records.get(self.meteo_idx) {
-                            m_rec.lai.unwrap_or(mp.lai)
-                        } else {
-                            mp.lai
-                        }
-                    } else {
-                        1.0
-                    };
-                    let scf = (1.0 - (-self.prj.atmosphere.extinction.max(0.1) * lai).exp()).max(0.0);
-                    let (p_net, tr_net, _) = crate::meteo::calculate_interception(
-                        self.prec,
-                        self.r_root,
-                        lai,
-                        self.prj.atmosphere.interception_a,
-                        scf,
-                        &mut self.interc_state,
-                    );
-                    self.prec = p_net;
-                    self.r_root = tr_net;
-                }
-
-                // 4. Net surface flux
-                self.r_top = self.r_soil.abs() - self.prec.abs();
+                // Re-evaluate effective rates idempotently from raw values
+                self.prec = self.prec_raw;
+                self.r_soil = self.r_soil_raw;
+                self.r_root = self.r_root_raw;
+                self.apply_snow_and_interception();
 
                 if (r_top_old - self.r_top).abs() > self.r_top.abs() * 0.2 && self.r_top < 0.0 {
                     self.min_step = true;
@@ -219,9 +153,6 @@ impl Simulation {
             }
             if self.kod_top == 3 || self.l_var_bc {
                 self.h_top = rec.h_top;
-            }
-            if self.prj.atmosphere.meteo.is_none() {
-                self.r_root = r_r.abs();
             }
         }
 		

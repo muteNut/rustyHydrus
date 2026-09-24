@@ -242,7 +242,7 @@ impl App {
         }
         self.sync();
         section(ui, "Modules in Development");
-        ui.label("Lenhard hysteresis, inverse (parameter estimation) optimization, and major ion chemistry (UnsatChem).");
+        ui.label("inverse (parameter estimation) optimization, and major ion chemistry (UnsatChem).");
     }
 
     pub fn page_geometry(&mut self, ui: &mut Ui, ch: &mut bool) {
@@ -875,22 +875,23 @@ impl App {
         ui.horizontal(|ui| {
             ui.label("Hysteresis");
             let cur = match self.prj.water.hysteresis {
-                Hysteresis::None => "No hysteresis",
-                Hysteresis::Retention => "Hysteresis in the retention curve",
-                Hysteresis::RetentionAndConductivity => "Hysteresis in retention and conductivity",
-                Hysteresis::Lenhard => "Lenhard et al. (not yet ported)",
-            };
-            ComboBox::from_id_salt("hyst").selected_text(cur).show_ui(ui, |ui| {
-                for (h, n) in [
-                    (Hysteresis::None, "No hysteresis"),
-                    (Hysteresis::Retention, "Hysteresis in the retention curve"),
-                    (Hysteresis::RetentionAndConductivity, "Hysteresis in retention and conductivity"),
-                ] {
-                    if ui.selectable_value(&mut self.prj.water.hysteresis, h, n).changed() {
-                        *ch = true;
-                    }
-                }
-            });
+				Hysteresis::None => "No hysteresis",
+				Hysteresis::Retention => "Hysteresis in the retention curve",
+				Hysteresis::RetentionAndConductivity => "Hysteresis in retention and conductivity",
+				Hysteresis::Lenhard => "Lenhard et al. air-entrapment hysteresis",
+			};
+			ComboBox::from_id_salt("hyst").selected_text(cur).show_ui(ui, |ui| {
+				for (h, n) in [
+					(Hysteresis::None, "No hysteresis"),
+					(Hysteresis::Retention, "Hysteresis in the retention curve"),
+					(Hysteresis::RetentionAndConductivity, "Hysteresis in retention and conductivity"),
+					(Hysteresis::Lenhard, "Lenhard et al. air-entrapment hysteresis"),
+				] {
+					if ui.selectable_value(&mut self.prj.water.hysteresis, h, n).changed() {
+						*ch = true;
+					}
+				}
+			});
         });
         if self.prj.water.hysteresis != Hysteresis::None {
             ui.horizontal(|ui| {

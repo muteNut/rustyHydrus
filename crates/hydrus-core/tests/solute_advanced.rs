@@ -351,6 +351,7 @@ fn test_dual_permeability_matrix_fracture_solute_transfer() {
 
     // Enable dual permeability
     prj.water.model = SoilModel::DualPermeability;
+	prj.cos_alpha = 0.0;
 	prj.water.materials[0].extra = [0.08, 0.42, 0.01, 1.6, 1.0];
     prj.solute.species[0].per_material[0].omega = 0.1; // Diffusive exchange rate
 
@@ -530,8 +531,10 @@ fn test_dual_permeability_water_flow_matrix_imbibition() {
     let mut prj = Project::default();
     prj.processes.water_flow = true;
     prj.water.model = SoilModel::DualPermeability;
+    prj.cos_alpha = 0.0; // Horizontal capillary imbibition
 
     prj.time.t_init = 0.0;
+
     prj.time.t_max = 0.5;
     prj.time.dt = 0.01;
     prj.time.dt_min = 0.001;
@@ -630,8 +633,8 @@ fn test_decay_chain_nonequilibrium_routing_l_nequil() {
     prj.solute.species.push(daughter);
 
     // Parent decays quickly
-    prj.solute.species[0].per_material[0].mu_w = 0.5;
-    prj.solute.species[0].per_material[0].mu_s = 0.5;
+    prj.solute.species[0].per_material[0].gam_w = 0.5;
+    prj.solute.species[0].per_material[0].gam_s = 0.5;
 
     // Initialize parent mass in immobile phase
     for node in &mut prj.profile.nodes {

@@ -199,7 +199,7 @@ impl Simulation {
             if mm.frac < 1.0 || mm.th_immobile > 0.0 || so.l_bact || so.l_dual_neq || self.l_dual_perm {
                 l_equil = false;
             }
-            l_mob[m] = mm.th_immobile > 0.0;
+            l_mob[m] = mm.th_immobile > 0.0 && !so.l_bact;
             if !l_equil && mm.bulk_density == 0.0 {
                 return Err(HydrusError::Invalid("Bulk density cannot be zero.".into()));
             }
@@ -291,8 +291,9 @@ impl Simulation {
                         sorb2[j][i] = ks2 * cc;
                     } else if so.l_dual_neq {
                         sorb[j][i] = cc; // Physical immobile liquid in equilibrium with mobile liquid
+                        let f_em = if p.r_kd2 > 0.0 { p.r_kd2 } else { frac[m] };
                         let sc = if !l_linear[j] && cc > 0.0 { cc.powf(p.beta - 1.0) / (1.0 + p.nu * cc.powf(p.beta)) } else { 1.0 };
-                        sorb2[j][i] = (1.0 - frac[m]) * sc * p.ks * cc; // Kinetic sorption site in mobile zone
+                        sorb2[j][i] = (1.0 - f_em) * sc * p.ks * cc; // Kinetic sorption site in mobile zone
                     } else if l_mob[m] {
                         sorb[j][i] = cc;
                     } else {
@@ -457,7 +458,8 @@ impl Simulation {
                 }
             }
             for js in 0..ns {
-                let mut iter = 0;	
+                let mut iter = 0;
+                st.c_prev_o.copy_from_slice(&st.conc[js]);
                 st.cv_top[js] = 0.0;
                 st.cv_bot[js] = 0.0;
                 st.cv_ch0[js] = 0.0;
@@ -479,6 +481,9 @@ impl Simulation {
                 } else if st.k_bot == 0 {
                     st.cv_bot[js] = alf * st.conc[js][0] * st.v_o[0];
                 }
+                if st.k_top < 0 && self.t_level != 1 && st.v_o[n - 1] < 0.0 {
+                    st.cv_top[js] = alf * st.c_top[js] * st.v_o[n - 1];
+                }
                 if st.k_top == -2 {
                     let m = n - 1;
                     let mat_top = self.mat[m];
@@ -489,8 +494,6 @@ impl Simulation {
                         (0.0, 0.0)
                     };
                     st.cv_top[js] += alf * g_vol * st.conc[js][m] - g_atm * st.c_atm;
-                } else if st.k_top < 0 && self.t_level != 1 && st.v_o[n - 1] < 0.0 {
-                    st.cv_top[js] = alf * st.c_top[js] * st.v_o[n - 1];
                 }
                 if !st.l_linear[js] {
                     st.c_new.copy_from_slice(&st.conc[js]);
@@ -557,9 +560,6 @@ impl Simulation {
                     thomas(&b, &mut d, &e, &mut f);
                     let mut lconv = true;
                     for i in 0..n {
-                        if iter == 1 {
-                            st.c_prev_o[i] = st.conc[js][i];
-                        }
                         if st.l_linear[js] {
                             st.conc[js][i] = f[i].max(0.0);
                             if st.conc[js][i] < 1e-30 && st.conc[js][i] > 0.0 {
@@ -601,22 +601,14 @@ impl Simulation {
                 if !st.l_equil && st.l_linear[js] {
                     self.sol_sorbconc(st, js, dt);
                 }
-                if self.l_dual_perm {
+                if self.l_dual_perm || self.model == SoilModel::DualPermeability {
                     self.sol_dual_perm(st, js, dt);
                 }
                 self.sol_masstran(st, js, epsi);
                 // fluxes across the boundaries
-                if st.k_top == -2 {
-                    let m = n - 1;
-                    let mat_top = self.mat[m];
-                    let henry = st.pm[js][mat_top].henry;
-                    let (g_vol, g_atm) = if st.d_surf > 1e-10 {
-                        (st.diff_g[js] * henry / st.d_surf, st.diff_g[js] / st.d_surf)
-                    } else {
-                        (0.0, 0.0)
-                    };
-                    st.cv_top[js] += epsi * g_vol * st.conc[js][m] - g_atm * st.c_atm;
-                } else if st.k_top < 0 {
+                if st.k_top > 0 {
+                    st.cv_top[js] = st.fn_ - st.bn * st.conc[js][n - 2] - st.dn * st.conc[js][n - 1];
+                } else {
                     if self.t_level != 1 {
                         if st.v_n[n - 1] < 0.0 {
                             st.cv_top[js] += epsi * st.v_n[n - 1] * st.c_top[js];
@@ -624,8 +616,17 @@ impl Simulation {
                     } else if st.v_n[n - 1] < 0.0 {
                         st.cv_top[js] += st.v_n[n - 1] * st.c_top[js];
                     }
-                } else {
-                    st.cv_top[js] = st.fn_ - st.bn * st.conc[js][n - 2] - st.dn * st.conc[js][n - 1];
+                    if st.k_top == -2 {
+                        let m = n - 1;
+                        let mat_top = self.mat[m];
+                        let henry = st.pm[js][mat_top].henry;
+                        let (g_vol, g_atm) = if st.d_surf > 1e-10 {
+                            (st.diff_g[js] * henry / st.d_surf, st.diff_g[js] / st.d_surf)
+                        } else {
+                            (0.0, 0.0)
+                        };
+                        st.cv_top[js] += epsi * g_vol * st.conc[js][m] - g_atm * st.c_atm;
+                    }
                 }
                 if st.k_bot < 0 {
                     if self.l_vapor && self.r_bot.abs() < 1e-20 {
@@ -891,9 +892,9 @@ impl Simulation {
             let s_product = if js > 0 {
                 let pp = parent.as_ref().unwrap();
                 if mob || self.i_dual_por > 0 {
-                    st.sorb[js - 1][i] * (th_imob * pp.mu_w + (1.0 - frac) * ro * pp.mu_s * pp.ks * sconc_ps)
+                    st.sorb[js - 1][i] * (th_imob * pp.gam_w + (1.0 - frac) * ro * pp.gam_s * pp.ks * sconc_ps)
                 } else if !st.l_bact {
-                    st.sorb[js - 1][i] * ro * pp.mu_s
+                    st.sorb[js - 1][i] * ro * pp.gam_s
                 } else {
                     0.0
                 }
@@ -909,7 +910,7 @@ impl Simulation {
 
             let c_parent_kin = if st.l_nequil && js > 0 {
                 let pp = parent.as_ref().unwrap();
-                pp.mu_s * ro * (if st.l_dual_neq { st.sorb2[js - 1][i] } else { st.sorb[js - 1][i] })
+                pp.gam_s * (if st.l_dual_neq { st.sorb2[js - 1][i] } else { st.sorb[js - 1][i] })
             } else {
                 0.0
             };
@@ -951,18 +952,20 @@ impl Simulation {
                             ssorb2 = st.sorb_n2[i];
                         }
                     } else if st.l_dual_neq {
-                        let e_mob = th_imob * xmu_l + (1.0 - frac) * ro * xmu_s + c_parent_im;
+                        let f_em = if p.r_kd2 > 0.0 { p.r_kd2 } else { frac };
+                        let omega_s = if p.omega > 0.0 { p.omega } else { omega };
+                        let e_mob = th_imob * xmu_l + (1.0 - f_em) * ro * xmu_s + c_parent_im;
                         if st.l_linear[js] {
                             let g_mob0 = (2.0 * a_mob - dt * (omega_eff + b_mob)) / d_mob;
                             st.sorb[js][i] = st.sorb[js][i] * g_mob0 + dt * (omega_eff * st.conc[js][i] + 2.0 * e_mob) / d_mob;
                             ssorb = st.sorb[js][i];
 
                             let s_old2 = st.sorb2[js][i];
-                            st.sorb2[js][i] = ((2.0 - (omega + gam_s + gam_s1) * dt) * s_old2
-                                + dt * (1.0 - frac) * omega * xks * st.conc[js][i]
-                                + dt * (1.0 - frac) * (2.0 * xmu_s)
+                            st.sorb2[js][i] = ((2.0 - (omega_s + gam_s + gam_s1) * dt) * s_old2
+                                + dt * (1.0 - f_em) * omega_s * xks * st.conc[js][i]
+                                + dt * (1.0 - f_em) * (2.0 * xmu_s)
                                 + 2.0 * dt * c_parent_kin)
-                                / (2.0 + dt * (omega + gam_s + gam_s1));
+                                / (2.0 + dt * (omega_s + gam_s + gam_s1));
                             ssorb2 = st.sorb2[js][i];
                         } else {
                             let cc = st.c_new[i];
@@ -975,8 +978,8 @@ impl Simulation {
 
                             let s_old2 = st.sorb2[js][i];
                             st.sorb_n2[i] = s_old2
-                                + dt * (epsi * (omega * ((1.0 - frac) * sconc * xks * cc - st.sorb_n2[i]) - (gam_s + gam_s1) * st.sorb_n2[i] + (1.0 - frac) * xmu_s + c_parent_kin)
-                                    + (1.0 - epsi) * (omega * ((1.0 - frac) * sconc_o * xks * st.conc[js][i] - s_old2) - (gam_s + gam_s1) * s_old2 + (1.0 - frac) * xmu_s + c_parent_kin));
+                                + dt * (epsi * (omega_s * ((1.0 - f_em) * sconc * xks * cc - st.sorb_n2[i]) - (gam_s + gam_s1) * st.sorb_n2[i] + (1.0 - f_em) * xmu_s + c_parent_kin)
+                                    + (1.0 - epsi) * (omega_s * ((1.0 - f_em) * sconc_o * xks * st.conc[js][i] - s_old2) - (gam_s + gam_s1) * s_old2 + (1.0 - f_em) * xmu_s + c_parent_kin));
                             ssorb2 = st.sorb_n2[i];
                         }
                     } else if mob {
@@ -1047,7 +1050,7 @@ impl Simulation {
 
             if let Some(pp) = &parent {
                 let cprev = if last { st.conc[js - 1][i] } else { st.c_prev_o[i] };
-                let (r_w, r_s, r_g) = (pp.mu_w, pp.mu_s, pp.mu_g);
+                let (r_w, r_s, r_g) = (pp.gam_w, pp.gam_s, pp.gam_g);
 
                 let mut cg = cprev * (r_w * th_w + ro * frac * pp.ks * r_s * sconc_p + th_g * pp.henry * r_g);
                 let mut cg1 = cg;
@@ -1490,7 +1493,7 @@ impl Simulation {
                 // Parent decay into immobile daughter domain (SOLUTE.FOR line 245)
                 let s_product = if st.l_nequil && js > 0 {
                     let pp = &st.pm[js - 1][m];
-                    st.sorb[js - 1][i] * (th_im * pp.mu_w + (1.0 - frac) * ro * pp.mu_s * pp.ks)
+                    st.sorb[js - 1][i] * (th_im * pp.gam_w + (1.0 - frac) * ro * pp.gam_s * pp.ks)
                 } else {
                     0.0
                 };
@@ -1500,18 +1503,20 @@ impl Simulation {
                 st.sorb[js][i] = st.sorb[js][i] * g_mob0 + dt * (omega_eff * st.conc[js][i] + 2.0 * e_mob) / d_mob;
 
                 if st.l_dual_neq {
+                    let f_em = if p.r_kd2 > 0.0 { p.r_kd2 } else { frac };
+                    let omega_s = if p.omega > 0.0 { p.omega } else { omega };
                     let s_product_kin = if st.l_nequil && js > 0 {
                         let pp = &st.pm[js - 1][m];
-                        pp.mu_s * ro * st.sorb2[js - 1][i]
+                        pp.gam_s * st.sorb2[js - 1][i]
                     } else {
                         0.0
                     };
                     let s_old2 = st.sorb2[js][i];
-                    st.sorb2[js][i] = ((2.0 - (omega + gam_s + gam_s1) * dt) * s_old2
-                        + dt * (1.0 - frac) * omega * xks * st.conc[js][i]
-                        + dt * (1.0 - frac) * (2.0 * p.mu0_s)
+                    st.sorb2[js][i] = ((2.0 - (omega_s + gam_s + gam_s1) * dt) * s_old2
+                        + dt * (1.0 - f_em) * omega_s * xks * st.conc[js][i]
+                        + dt * (1.0 - f_em) * (2.0 * p.mu0_s)
                         + 2.0 * dt * s_product_kin)
-                        / (2.0 + dt * (omega + gam_s + gam_s1));
+                        / (2.0 + dt * (omega_s + gam_s + gam_s1));
                 }
             } else {
                 let s_product_kin = if st.l_nequil && js > 0 {
@@ -1544,10 +1549,16 @@ impl Simulation {
             let c_star = if gamma_w >= 0.0 { c_f_mid } else { c_m };
             let gamma_s = gamma_w * c_star + omega * (c_f_mid - c_m);
 
-            let w_m = (1.0 - self.w_fracture).max(0.001);
-            let th_matrix = self.th_matrix_new[i].max(0.001);
+            let w_m = (1.0 - self.w_fracture).clamp(0.001, 0.999);
+            let th_m = if i < self.th_matrix_new.len() && self.th_matrix_new[i] > 0.001 {
+                self.th_matrix_new[i]
+            } else if m < self.par_d.len() && self.par_d[m][7] > 0.001 {
+                self.par_d[m][7]
+            } else {
+                self.ths[m]
+            };
 
-            let delta_c_m = (dt * gamma_s) / (w_m * th_matrix);
+            let delta_c_m = (dt * gamma_s) / (w_m * th_m);
             st.conc_m[js][i] = (c_m + delta_c_m).max(0.0);
         }
     }

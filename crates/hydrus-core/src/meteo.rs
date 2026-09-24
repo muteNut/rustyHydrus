@@ -2,6 +2,7 @@
 //! TIME.FOR: SetMeteo, RadGlobal, Cloudiness, CropRes, RadLongNet, Aero).
 
 use crate::model::{MeteoRecord, MeteoSettings};
+use crate::vapor::latent_heat_volumetric;
 
 fn ea(t: f64) -> f64 {
     0.6108 * ((17.27 * t) / (t + 237.3)).exp()
@@ -454,8 +455,30 @@ pub fn aero_res(
     r_v
 }
 
-/// Surface energy balance (port of subroutine Evapor from TIME.FOR).
-/// Returns `(r_top_evap, heat_flux_w_m2, sens_flux, evap_kg_m2_s, r_v, r_s)`
+/// Cloud cover fraction (Cloudiness in TIME.FOR, daily-interval branch).
+pub fn cloud_cover(mp: &MeteoSettings, rec: &MeteoRecord, t_conv: f64) -> f64 {
+    let pi = std::f64::consts::PI;
+    let tt_conv = 24.0 * 3600.0 * t_conv;
+    let day_no = (rec.t / tt_conv).rem_euclid(365.0);
+    let (ra, omega, _, _) = rad_global(mp.latitude, day_no);
+    match mp.i_sun_sh {
+        0 => {
+            let nn = 24.0 / pi * omega;
+            if nn > 0.0 { 1.0 - (rec.sun_hours / nn).min(1.0) } else { 1.0 }
+        }
+        1 => (1.0 - (rec.sun_hours - mp.long_wave_b) / mp.long_wave_a.max(1e-12)).clamp(0.0, 1.0),
+        2 => (2.330 - 3.330 * rec.sun_hours).clamp(0.0001, 1.0),
+        _ => {
+            let tt = if ra > 0.0 { rec.rad / ra } else { 0.0 };
+            (2.330 - 3.330 * tt).clamp(0.1, 1.0)
+        }
+    }
+}
+
+/// Surface energy balance (port of Evapor + RadLongNet1 from TIME.FOR).
+/// `rad` = incoming solar radiation [MJ/m2/d]; `cover` = cloud cover fraction [-].
+/// Returns `(evap_m_s, heat_flux_w_m2, sens_flux, evap_kg_m2_s, r_v, r_s)`
+#[allow(clippy::too_many_arguments)]
 pub fn surface_energy_balance(
     temp_s: f64,
     temp_a: f64,
@@ -463,6 +486,7 @@ pub fn surface_energy_balance(
     rad: f64,
     h_top: f64,
     theta_top: f64,
+    cover: f64,
     wind_ms: f64,
     wind_height: f64,
     temp_height: f64,
@@ -472,55 +496,61 @@ pub fn surface_energy_balance(
     let x_mol = 0.018015;
     let r_gas = 8.314;
     let ca = 1200.0;
+    let sigma = 4.899e-9; // Stefan-Boltzmann [MJ/d/m2/K4]
+    let r_conv = 1.0e6 / 86400.0; // MJ/m2/d -> W/m2
 
     let t_kelv_s = temp_s + 273.15;
     let t_kelv_a = temp_a + 273.15;
 
-    // Saturated and actual atmospheric vapor density [kg/m3]
+    // Atmospheric vapor density
     let rovs_a = 0.001 * (31.3716 - 6014.79 / t_kelv_a - 0.00792495 * t_kelv_a).exp() / t_kelv_a;
-    let roa = (rh_mean / 100.0) * rovs_a;
+    let roa = rh_mean / 100.0 * rovs_a;
 
-    // Aerodynamic resistance r_v
+    // Aerodynamic resistance and soil surface resistance (van de Griend & Owe)
     let r_v = aero_res(temp_height, wind_height, wind_ms, t_kelv_s, t_kelv_a);
     let r_h = r_v;
+    let r_s = if theta_top < 0.15 { 10.0 * (35.63 * (0.15 - theta_top)).exp() } else { 10.0 };
 
-    // Soil surface resistance r_s (van de Griend and Owe, 1994)
-    let r_s = if theta_top < 0.15 {
-        10.0 * (35.63 * (0.15 - theta_top)).exp()
+    // Surface albedo, van Bavel & Hillel (1976)
+    let albedo = if theta_top > 0.25 {
+        0.1
+    } else if theta_top > 0.1 {
+        0.35 - theta_top
     } else {
-        10.0
+        0.25
     };
+    let rns = (1.0 - albedo) * rad; // [MJ/m2/d]
 
-    // Sensible heat flux [W/m2]
+    // Net longwave radiation (RadLongNet1); Ea in kPa as in the Fortran
+    let es = ea(temp_a);
+    let ea_act = rh_mean / 100.0 * es;
+    let epsi = 1.24 * (ea_act / t_kelv_a).powf(1.0 / 7.0); // Brutsaert (1975)
+    let epsi_a = ((1.0 - 0.84 * cover) * epsi + 0.84 * cover).clamp(0.0, 1.0);
+    let epsi_s = (0.9 + 0.18 * theta_top).min(1.0);
+    let rlu = epsi_s * sigma * t_kelv_s.powi(4);
+    let rld = epsi_a * sigma * t_kelv_a.powi(4);
+    let rnl = rld - rlu; // already signed (net incoming)
+    let rn = rns + rnl; // Equation 50 as coded in Evapor
+
+    // Sensible heat
     let sens_flux = ca * (temp_s - temp_a) / r_h;
 
-    // Soil surface vapor density with water potential effect
+    // Evaporation
     let h_m = h_top / x_conv;
-    let hr = (h_m * x_mol * g / r_gas / t_kelv_s).exp().clamp(0.0001, 1.0);
+    let hr = (h_m * x_mol * g / r_gas / t_kelv_s).exp();
     let rovs_s = 0.001 * (31.3716 - 6014.79 / t_kelv_s - 0.00792495 * t_kelv_s).exp() / t_kelv_s;
     let rov = rovs_s * hr;
-
-    // Evaporation flux [kg/(m2·s)]
     let evap_kg_m2_s = ((rov - roa) / (r_v + r_s)).max(0.0);
 
-    // Latent heat of vaporization [J/kg]
-    let lat = (2.501 - 0.002361 * temp_a) * 1e6;
-    let latent_heat_flux = lat * evap_kg_m2_s; // [W/m2]
-
-    // Net radiation converted from MJ/m2/d to W/m2 (1e6 / 86400)
-    let rn_w_m2 = rad * (1e6 / 86400.0);
-
-    // Soil heat flux G [W/m2]
-    let heat_flux_w_m2 = rn_w_m2 - sens_flux - latent_heat_flux;
-
-    // Water density [kg/m3]
+    // Latent heat: Lat = xLatent(TempA)/row(TempS)  [J/kg]
     let row = (1.0 - 7.37e-6 * (temp_s - 4.0).powi(2) + 3.79e-8 * (temp_s - 4.0).powi(3)) * 1000.0;
-    // Evaporation velocity [m/s]
+    let lat = latent_heat_volumetric(temp_a) / row;
+
+    let heat_flux_w_m2 = rn * r_conv - sens_flux - lat * evap_kg_m2_s;
     let evap_m_s = evap_kg_m2_s / row;
 
     (evap_m_s, heat_flux_w_m2, sens_flux, evap_kg_m2_s, r_v, r_s)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -732,32 +762,36 @@ mod tests {
         assert!(min_step);
     }
 	
-	#[test]
-    fn test_surface_energy_balance_and_aero_res() {
-        let rv = aero_res(150.0, 200.0, 2.5, 20.0 + 273.15, 18.0 + 273.15);
-        assert!(rv > 0.0 && rv < 500.0);
+#[test]
+fn test_surface_energy_balance_and_aero_res() {
+    let rv = aero_res(150.0, 200.0, 2.5, 20.0 + 273.15, 18.0 + 273.15);
+    assert!(rv > 0.0 && rv < 500.0);
 
-        let (evap_m_s, g_flux, sens_flux, evap_kg, _, _) = surface_energy_balance(
-            22.0,   // Soil temp [C]
-            20.0,   // Air temp [C]
-            50.0,   // RH [%]
-            15.0,   // Net radiation [MJ/m2/d]
-            -100.0, // hTop [cm]
-            0.20,   // ThetaTop
-            2.0,    // Wind [m/s]
-            200.0,
-            150.0,
-            100.0,  // xConv
-        );
+    let (temp_s, temp_a, rh, rad, theta, cover) = (22.0, 20.0, 50.0, 15.0, 0.20, 0.3);
+    let (evap_m_s, g_flux, sens_flux, evap_kg, _, _) = surface_energy_balance(
+        temp_s, temp_a, rh, rad, -100.0, theta, cover, 2.5, 200.0, 150.0, 100.0,
+    );
 
-        assert!(evap_m_s > 0.0);
-        assert!(evap_kg > 0.0);
-        assert!(sens_flux > 0.0); // Soil is warmer than air -> sensible heat flux upwards
-        // Net radiation = G + H + Latent
-        let rn_w = 15.0 * (1e6 / 86400.0);
-        let latent = evap_kg * (2.501 - 0.002361 * 20.0) * 1e6;
-        assert!((rn_w - (g_flux + sens_flux + latent)).abs() < 1e-4);
-    }
+    assert!(evap_m_s > 0.0);
+    assert!(evap_kg > 0.0);
+    assert!(sens_flux > 0.0); // soil warmer than air
+
+    // Independently reconstruct Rn = Rns + (Rld - Rlu) and check G + H + LE = Rn
+    let (tks, tka) = (temp_s + 273.15, temp_a + 273.15);
+    let albedo = 0.35 - theta; // 0.10 < theta <= 0.25
+    let rns = (1.0 - albedo) * rad;
+    let ea_act = rh / 100.0 * ea(temp_a);
+    let epsi = 1.24 * (ea_act / tka).powf(1.0 / 7.0);
+    let eps_a = ((1.0 - 0.84 * cover) * epsi + 0.84 * cover).clamp(0.0, 1.0);
+    let eps_s = (0.9 + 0.18 * theta).min(1.0);
+    let sigma = 4.899e-9;
+    let rn_w = (rns + eps_a * sigma * tka.powi(4) - eps_s * sigma * tks.powi(4)) * 1e6 / 86400.0;
+    let row = (1.0 - 7.37e-6 * (temp_s - 4.0).powi(2) + 3.79e-8 * (temp_s - 4.0).powi(3)) * 1000.0;
+    let lat = (2.501e6 - 2369.2 * temp_a) * (1.0 - 7.37e-6 * (temp_a - 4.0).powi(2)
+        + 3.79e-8 * (temp_a - 4.0).powi(3)) * 1000.0 / row;
+    let latent = evap_kg * lat;
+    assert!((rn_w - (g_flux + sens_flux + latent)).abs() < 1e-6);
+}
 	
 	#[test]
     fn test_hourly_radiation_imethour_diurnal_curve() {
