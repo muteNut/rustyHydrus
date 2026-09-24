@@ -160,6 +160,7 @@ impl App {
         self.edit.to = self.prj.profile.depth();
         self.post = PostState::default();
         self.page = Page::Main;
+		self.sync();
     }
 
     fn start_run(&mut self) {
@@ -354,16 +355,24 @@ impl App {
                             }
                             Err(e) => self.status = e.to_string(),
                         },
-                        Purpose::ImportLegacy => match hydrus_io::read_legacy_project(&path) {
-                            Ok(mut p) => {
-                                if p.title.trim().is_empty() {
-                                    p.title = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                        Purpose::ImportLegacy => {
+                            match hydrus_io::read_legacy_project(&path) {
+                                Ok(mut p) => {
+                                    if p.title.trim().is_empty() {
+                                        p.title = path
+                                            .file_name()
+                                            .map(|s| s.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                    }
+                                    self.set_project(p, None);
+                                    self.dirty = true;
+                                    self.status = format!("Imported HYDRUS-1D project from {}", path.display());
                                 }
-                                self.set_project(p, None);
-                                self.dirty = true;
-                                self.status = format!("Imported HYDRUS-1D project from {}", path.display());
+                                Err(e) => {
+                                    self.status = format!("Import failed: {}", e);
+                                    self.problems = vec![format!("Failed to import from {}: {}", path.display(), e)];
+                                }
                             }
-                            Err(e) => self.status = format!("Import failed: {}", e),
                         },
                         Purpose::SaveProject => {
                             let mut p = path.clone();

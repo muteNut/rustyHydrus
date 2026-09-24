@@ -237,9 +237,14 @@ impl App {
     pub fn page_soil_props(&mut self, ui: &mut Ui) {
         ui.heading("Soil hydraulic properties");
         let nm = self.prj.water.materials.len();
+        if nm == 0 {
+            ui.label("No materials defined.");
+            return;
+        }
         ui.horizontal(|ui| {
             for i in 0..nm {
-                if ui.selectable_label(self.post.prop_mat == i, format!("{} {}", i + 1, self.prj.water.materials[i].name)).clicked() {
+                let name = &self.prj.water.materials[i].name;
+                if ui.selectable_label(self.post.prop_mat == i, format!("{} {}", i + 1, name)).clicked() {
                     self.post.prop_mat = i;
                 }
             }

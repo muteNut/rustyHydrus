@@ -204,7 +204,12 @@ impl Simulation {
         let n = prj.profile.nodes.len();
         let n_mat = prj.water.materials.len();
         let model = prj.water.model;
-        let i_hyst = prj.water.hysteresis.code();
+		let i_hyst = prj.water.hysteresis.code();
+		let i_dual_por = match model {
+			SoilModel::DualPorosityW => 1,
+			SoilModel::DualPorosityH => 2,
+			_ => 0,
+		};
 
         let x_conv = prj.units.x_conv();
         let t_conv = prj.units.t_conv();
@@ -251,12 +256,10 @@ impl Simulation {
             par_d.push(p);
         }
         // tables
-        let mut h1 = prj.water.h_tab1;
-        let mut hn = prj.water.h_tab_n;
-        h1 = -h1.abs().min(hn.abs());
-        hn = -h1.abs().max(hn.abs());
+        let mut h1 = -prj.water.h_tab1.abs().min(prj.water.h_tab_n.abs());
+        let mut hn = -prj.water.h_tab1.abs().max(prj.water.h_tab_n.abs());
         let mut l_table = true;
-        if (h1 > -0.00001 && hn > -0.00001) || h1 == hn {
+        if (h1 - hn).abs() < 1e-5 {
             l_table = false;
             h1 = -0.0001 * x_conv;
             hn = -100.0 * x_conv;
@@ -297,33 +300,53 @@ impl Simulation {
                 *b = if sb > 0.0 { *b / sb } else { 0.0 };
             }
         }
-        let mut h0: Vec<f64> = nodes.iter().map(|nd| nd.h).collect();
-        let kappa0 = if i_hyst > 0 { prj.water.init_kappa } else { -1 };
-        let kappa = vec![kappa0; n];
-        for i in 0..n {
-            let m = mat[i];
-            if (model.code()) < 10 {
-                h0[i] = h0[i].max(ah[i] * fh(model, 0.00000001, &par_d[m]));
-            }
-        }
-        if prj.water.init_in_water_content {
-            for i in 0..n {
-                let m = mat[i];
-                if kappa[i] == -1 {
-                    let qe = ((h0[i] - par_d[m][0]) / (par_d[m][1] - par_d[m][0])).min(1.0);
-                    if qe < 0.0 {
-                        return Err(HydrusError::Invalid("Initial water content is lower than θr.".into()));
-                    }
-                    h0[i] = fh(model, qe, &par_d[m]);
-                } else {
-                    let qe = ((h0[i] - par_w[m][0]) / (par_w[m][1] - par_w[m][0])).min(1.0);
-                    if qe < 0.0 {
-                        return Err(HydrusError::Invalid("Initial water content is lower than θr.".into()));
-                    }
-                    h0[i] = fh(model, qe, &par_w[m]);
-                }
-            }
-        }
+		let mut h0: Vec<f64> = nodes.iter().map(|nd| nd.h).collect();
+		let kappa0 = prj.water.hysteresis.initial_branch_code(prj.water.init_kappa);
+		let kappa = vec![kappa0; n];
+		
+		// Lower bound on the pressure head (only meaningful when h0 really is a head)
+		if !prj.water.init_in_water_content {
+			for i in 0..n {
+				let m = mat[i];
+				if model.code() < 10 {
+					h0[i] = h0[i].max(ah[i] * fh(model, 0.00000001, &par_d[m]));
+				}
+			}
+		}
+        // Immobile water content from the initial condition (Fortran InitW, iDualPor > 0)
+		let mut th_im_water = vec![0.0; n];
+
+		if prj.water.init_in_water_content {
+			for i in 0..n {
+				let m = mat[i];
+				// Values greater than 1.0 are positive pressure heads (saturated zone/ponding)
+				if h0[i] > 1.0 {
+					continue;
+				}
+				if i_dual_por > 0 {
+					let th_total = h0[i];
+					h0[i] = th_total * par_d[m][1] / (par_d[m][1] + par_d[m][7]);
+					th_im_water[i] = th_total - h0[i];
+				}
+				let (qr, qs) = if kappa[i] == -1 {
+					(par_d[m][0], par_d[m][1])
+				} else {
+					(par_w[m][0], par_w[m][1])
+				};
+				let d_xz = if ath[i] > 0.0 { ath[i] } else { 1.0 };
+				let qe = ((h0[i] - qr) / (qs - qr) / d_xz).min(1.0);
+				if qe <= 0.0 {
+					return Err(HydrusError::Invalid("Initial water content is lower than θr.".into()));
+				}
+				if qe >= 1.0 {
+					h0[i] = 0.0;
+				} else if kappa[i] == -1 {
+					h0[i] = fh(model, qe, &par_d[m]) * ah[i];
+				} else {
+					h0[i] = fh(model, qe, &par_w[m]) * ah[i] * ah_w[m];
+				}
+			}
+		}
         // ---- boundary condition codes (BasInf "input modifications")
         let mut kod_top = bc.kod_top;
         let mut kod_bot = bc.kod_bot;
@@ -334,9 +357,8 @@ impl Simulation {
         if bc.bot_time_variable {
             kod_bot = if kod_bot >= 0 { 3 } else { -3 };
         }
-        let mut h_crit_s = prj.atmosphere.h_crit_s;
+        let h_crit_s = prj.atmosphere.h_crit_s;
         if bc.atmospheric && kod_top < 0 {
-            h_crit_s = 0.0;
             kod_top = -4;
         }
         if bc.surface_layer {
@@ -355,16 +377,15 @@ impl Simulation {
             || (!bc.bot_time_variable && bc.kod_bot == -1 && !bc.gwl_flux && !bc.free_drainage && !bc.seepage_face && bc.drains.is_none());
         let (r_top, r_bot, r_root) = if const_flux_read { (bc.r_top, bc.r_bot, bc.r_root.abs()) } else { (0.0, 0.0, 0.0) };
 		
-		let i_dual_por = match model {
-			SoilModel::DualPorosityW => 1,
-			SoilModel::DualPorosityH => 2,
-			_ => 0,
-		};
 		// Initialize th_old_im and th_new_im with ths_im (par_d[m][7]) or initial condition
 		let mut th_init_im = vec![0.0; n];
 		for i in 0..n {
 			let m = mat[i];
-			th_init_im[i] = par_d[m][7]; // default to ths_im
+			th_init_im[i] = if prj.water.init_in_water_content && i_dual_por > 0 {
+				th_im_water[i]
+			} else {
+				par_d[m][7] // overwritten in initialise() when the IC is a pressure head
+			};
 		}
 		
 		let l_dual_perm = model == SoilModel::DualPermeability;
@@ -374,6 +395,7 @@ impl Simulation {
         let tm = &prj.time;
         let mut t_print = tm.print_times.clone();
         t_print.push(tm.t_max);
+		let th_rr: Vec<f64> = (0..n).map(|i| thr[mat[i]]).collect();
 
         let mut sim = Simulation {
             n,
@@ -432,9 +454,9 @@ impl Simulation {
             sink: vec![0.0; n],
             con_o: vec![0.0; n],
             kappa: kappa.clone(),
-            kappa_o: kappa,
+            kappa_o: kappa.clone(),
             ath_s: vec![1.0; n],
-            th_rr: vec![0.0; n],
+            th_rr,
             con_r: vec![0.0; n],
             ak_s: vec![1.0; n],
             v_old: vec![0.0; n],
@@ -549,90 +571,126 @@ impl Simulation {
         Ok(sim)
     }
 
-    fn initialise(&mut self) -> Result<(), HydrusError> {
-        // hTop / hBot come from the initial condition at the boundary nodes
-        self.h_top = self.h_new[self.n - 1];
-        self.h_bot = self.h_new[0];
+	fn initialise(&mut self) -> Result<(), HydrusError> {
+		// hTop / hBot come from the initial condition at the boundary nodes
+		self.h_top = self.h_new[self.n - 1];
+		self.h_bot = self.h_new[0];
 
-        // Initial hydraulic properties
-        if self.i_hyst == 3 {
-            let ik = self.prj.water.init_kappa;
-            self.lenhard_hyst(ik, 1, crate::lenhard::ThetaTarget::Old);
-            self.th_new = self.th_old.clone();
-        } else {
-            self.set_mat(0);
-            self.th_old = self.th_eq.clone();
-            self.th_new = self.th_eq.clone();
-        }
+		// Temperature first: set_mat (vapor flow) reads it
+		if self.l_temp {
+			self.heat_init()?;
+		}
 
-        if self.l_temp {
-            self.heat_init()?;
-        }
-        if self.l_chem {
-            self.solute_init()?;
-        }
+		self.init_water_state();
 
-        // Atmospheric information
-        if self.top_inf || self.bot_inf || self.atm_bc {
-            self.atm_idx = 0;
-            self.meteo_idx = 0;
-            self.snow_layer = 0.0;
-            self.interc_state = crate::meteo::InterceptionState::default();
-            self.t_atm2 = self.t_max;
-            self.set_bc()?;
-            let mut next_atm_time = self.t_atm1.min(self.t_atm2);
-            if let Some(ref mp) = self.prj.atmosphere.meteo {
-                if self.meteo_idx < mp.records.len() {
-                    let t_meteo = mp.records[self.meteo_idx].t;
-                    if t_meteo > self.t_init {
-                        next_atm_time = next_atm_time.min(t_meteo);
-                    }
-                }
-            }
-            self.t_atm = next_atm_time;
-            if self.l_chem {
-                self.set_chem_bc();
-            }
-            if self.prj.atmosphere.daily_variation {
-                self.r_root_d = self.r_root;
-                self.r_soil_d = self.r_soil;
-                self.daily_var_root_soil();
-            }
-            if self.prj.atmosphere.sinusoidal_precip {
-                self.prec_d = self.prec;
-                self.t_atm_old = self.t_init;
-                self.sin_prec();
-            }
-            // Evaluate snowpack and canopy interception on initial boundary ingestion
-            self.apply_snow_and_interception();
-            if self.kod_top == -4 || !self.l_var_bc {
-                self.r_top = self.r_soil.abs() - self.prec.abs();
-            }
-        }
+		if self.l_chem {
+			self.solute_init()?; // uses th_old
+		}
 
-        if self.l_root {
-            self.set_rg();
-        }
-        if self.sink_f {
-            self.set_snk();
-        }
+		if self.top_inf || self.bot_inf || self.atm_bc {
+			self.init_atmosphere()?;
+		}
 
-        // Initial output
-        self.profile_out(self.t_init);
-        self.sub_reg(0);
-        if self.l_chem || self.l_temp || self.l_vapor {
-            let (ho, thn) = (self.h_old.clone(), self.th_old.clone());
-            let temps: Vec<f64> = (0..self.n).map(|i| self.temp(i)).collect();
-            let (v, vv) = self.veloc(&ho, &thn, &thn, &temps);
-            self.v_old = v;
-            self.v_v_old = vv;
-        }
-        self.v_new = self.v_old.clone();
-        self.v_v_new = self.v_v_old.clone();
-        self.th_new = self.th_old.clone();
-        Ok(())
-    }
+		if self.l_root {
+			self.set_rg();
+		}
+		if self.sink_f {
+			self.set_snk();
+		}
 
+		// Initial output
+		self.profile_out(self.t_init);
+		self.sub_reg(0);
+
+		if self.l_chem || self.l_temp || self.l_vapor {
+			let (ho, thn) = (self.h_old.clone(), self.th_old.clone());
+			let temps: Vec<f64> = (0..self.n).map(|i| self.temp(i)).collect();
+			let (v, vv) = self.veloc(&ho, &thn, &thn, &temps);
+			self.v_old = v;
+			self.v_v_old = vv;
+		}
+		self.v_new = self.v_old.clone();
+		self.v_v_new = self.v_v_old.clone();
+		Ok(())
+	}
+
+	/// Initial hydraulic properties, water contents and immobile water.
+	fn init_water_state(&mut self) {
+		if self.i_hyst == 3 {
+			let ik = self.prj.water.init_kappa;
+			self.lenhard_hyst(ik, 1, crate::lenhard::ThetaTarget::Old);
+		} else {
+			self.set_mat(0);
+			if self.prj.water.init_in_water_content {
+				for i in 0..self.n {
+					let h_init = self.prj.profile.nodes[self.n - 1 - i].h;
+					if h_init >= 0.0 && h_init <= 1.0 {
+						self.th_eq[i] = h_init;
+					}
+				}
+			}
+			self.th_old.copy_from_slice(&self.th_eq);
+		}
+		self.th_new.copy_from_slice(&self.th_old);
+
+		if self.l_vapor {
+			self.th_v_old = self.th_v_new.clone();
+			// th_v_new stays equal to th_v_old at the start (as in HYDRUS.FOR)
+		}
+
+		// InitDualPor: only if the IC was a pressure head (otherwise set in new())
+		if self.i_dual_por > 0 && !self.prj.water.init_in_water_content {
+			for i in 0..self.n {
+				let p = self.par_d[self.mat[i]];
+				self.th_new_im[i] = if self.i_dual_por == 1 {
+					let se = (self.th_old[i] - p[0]) / (p[1] - p[0]);
+					p[6] + se * (p[7] - p[6])
+				} else {
+					let par_im: Par = [p[6], p[7], p[8], p[9], p[10], p[5], 0.0, 0.0, 0.0, 0.0, 0.0];
+					fq(SoilModel::VanGenuchten, self.h_new[i], &par_im)
+				};
+			}
+			self.th_old_im = self.th_new_im.clone();
+		}
+	}
+
+	/// First atmospheric record and derived surface fluxes.
+	fn init_atmosphere(&mut self) -> Result<(), HydrusError> {
+		self.atm_idx = 0;
+		self.meteo_idx = 0;
+		self.snow_layer = 0.0;
+		self.interc_state = crate::meteo::InterceptionState::default();
+		self.t_atm2 = self.t_max;
+		self.set_bc()?; // also applies snow / interception (see #10)
+
+		let mut next = self.t_atm1.min(self.t_atm2);
+		if let Some(mp) = &self.prj.atmosphere.meteo {
+			if let Some(rec) = mp.records.get(self.meteo_idx) {
+				if rec.t > self.t_init {
+					next = next.min(rec.t);
+				}
+			}
+		}
+		self.t_atm = next;
+
+		if self.l_chem {
+			self.set_chem_bc();
+		}
+		if self.prj.atmosphere.daily_variation {
+			self.r_root_d = self.r_root;
+			self.r_soil_d = self.r_soil;
+			self.daily_var_root_soil();
+		}
+		if self.prj.atmosphere.sinusoidal_precip {
+			self.prec_d = self.prec;
+			self.t_atm_old = self.t_init;
+			self.sin_prec();
+		}
+		if self.kod_top == -4 || !self.l_var_bc {
+			self.r_top = self.r_soil.abs() - self.prec.abs();
+		}
+		Ok(())
+	}
     /// Evaluates dynamic snow accumulation/melt and canopy interception/LAI partitioning.
     pub fn apply_snow_and_interception(&mut self) {
         if !self.prj.atmosphere.snow && !self.prj.atmosphere.interception && !self.prj.atmosphere.lai_partitioning {
@@ -785,10 +843,15 @@ impl Simulation {
         if self.print_daily && (self.t_print1 - self.t).abs() < 0.001 * self.dt {
             self.t_print1 += self.print_int;
         }
-        if self.p_level < self.t_print.len() && (self.t_print[self.p_level] - self.t).abs() < 0.001 * self.dt {
+        let at_profile_print = (self.p_level < self.t_print.len() && (self.t_print[self.p_level] - self.t).abs() <= 0.01 * self.dt)
+            || self.l_end;
+
+        if at_profile_print {
             self.profile_out(self.t);
             self.sub_reg(self.p_level + 1);
-            self.p_level += 1;
+            if self.p_level < self.t_print.len() && (self.t_print[self.p_level] - self.t).abs() <= 0.01 * self.dt {
+                self.p_level += 1;
+            }
         }
 
         // ---- A-level
@@ -868,11 +931,6 @@ impl Simulation {
             }
         }
 
-        // Apply step-level snowpack melt/accumulation and interception before next step's wat_flow
-        if self.atm_bc || self.top_inf {
-            self.apply_snow_and_interception();
-        }
-
         self.t_level += 1;
         if self.t_level > 999_999 {
             self.t_level = 2;
@@ -924,6 +982,12 @@ impl Simulation {
                 }
                 self.h_old[i] = self.h_new[i];
                 self.h_new[i] = self.h_temp[i];
+            }
+            if self.kod_top > 0 {
+                self.h_old[n - 1] = self.h_new[n - 1];
+            }
+            if self.kod_bot > 0 {
+                self.h_old[0] = self.h_new[0];
             }
         }
         for i in 0..n {

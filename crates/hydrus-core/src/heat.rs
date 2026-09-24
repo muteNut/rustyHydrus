@@ -177,21 +177,19 @@ impl Simulation {
             }
         }
 
-        // ====================================================================
-        // HIER WIRD EINGEFÜGT: TempAdj (Matrix-Korrektur für Wasserdampf)
-        // ====================================================================
         if self.l_vapor {
             let cv = 1.8e6 / self.x_conv / self.t_conv.powi(2);
             let mut g0 = vec![0.0; n];
             for i_level in 1..=2 {
                 for i in 0..n {
-                    let v_v_grad = if i == 0 {
-                        (self.v_v_old[1] - self.v_v_old[0]) / (x[1] - x[0])
-                    } else if i == n - 1 {
-                        (self.v_v_old[n - 1] - self.v_v_old[n - 2]) / (x[n - 1] - x[n - 2])
-                    } else {
-                        (self.v_v_old[i + 1] - self.v_v_old[i - 1]) / (x[i + 1] - x[i - 1]) * 2.0
-                    };
+                    let vv = if i_level == 1 { &self.v_v_old } else { &self.v_v_new };
+					let v_v_grad = if i == 0 {
+						(vv[1] - vv[0]) / (x[1] - x[0])
+					} else if i == n - 1 {
+						(vv[n - 1] - vv[n - 2]) / (x[n - 1] - x[n - 2])
+					} else {
+						(vv[i + 1] - vv[i - 1]) / (x[i + 1] - x[i - 1]) * 2.0
+					};
                     let temp_eval = if i_level == 1 { self.heat.as_ref().unwrap().temp_o[i] } else { self.heat.as_ref().unwrap().temp_n[i] };
                     let lat = crate::vapor::latent_heat_volumetric(temp_eval) / self.x_conv / self.t_conv.powi(2);
                     let th_v_grad = (self.th_v_new[i] - self.th_v_old[i]) / dt;
@@ -260,5 +258,13 @@ impl Simulation {
         thomas(&bb, &mut d, &ee, &mut f);
         let hs = self.heat.as_mut().unwrap();
         hs.temp_n.copy_from_slice(&f);
+		// Update dt_max_t matching TEMPER.FOR
+        self.dt_max_t = 1e30;
+        let l_en_bal = self.prj.atmosphere.meteo.as_ref().map(|m| m.l_en_bal).unwrap_or(false);
+        if l_en_bal {
+            let d_temp_max = 2.0;
+            let d_temp = (hs.temp_n[n - 1] - hs.temp_o[n - 1]).abs();
+            self.dt_max_t = (d_temp_max / d_temp.max(0.1) * dt).min(self.dt_max_t);
+        }
     }
 }

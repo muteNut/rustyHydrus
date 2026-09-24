@@ -140,7 +140,7 @@ impl Simulation {
                 let dxb = self.x[i] - self.x[i - 1];
                 let va = -(self.con[i] + self.con[i + 1]) / 2.0 * ((self.h_new[i + 1] - self.h_new[i]) / dxa + grav);
                 let vb = -(self.con[i] + self.con[i - 1]) / 2.0 * ((self.h_new[i] - self.h_new[i - 1]) / dxb + grav);
-                vi = (va * dxa + vb * dxb) / (dxa + dxb);
+                vi = (va * dxb + vb * dxa) / (dxa + dxb);
             }
 
             let sorb2 = (0..ns).map(|j| {
@@ -159,12 +159,13 @@ impl Simulation {
             } else {
                 None
             };
-
+			
+			let theta_val = if t <= self.t_init + 1e-12 { self.th_old[i] } else { self.th_new[i] };
             nodes.push(NodeOut {
                 node: n - i,
                 depth: self.x[n - 1] - self.x[i],
                 h: self.h_new[i],
-                theta: self.th_new[i],
+                theta: theta_val,
                 k: self.con[i],
                 c: self.cap[i],
                 flux: vi,

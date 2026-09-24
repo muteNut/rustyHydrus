@@ -128,7 +128,7 @@ impl Simulation {
             }
         }
     }
-
+	
     pub fn atm_record_scalars(&mut self, rec: &AtmRecord) {
         if let Some(h) = self.heat.as_mut() {
             h.t_top = rec.t_top;
@@ -457,8 +457,7 @@ impl Simulation {
                 }
             }
             for js in 0..ns {
-                let mut iter = 0;
-				st.c_prev_o.copy_from_slice(&st.conc[js]);
+                let mut iter = 0;	
                 st.cv_top[js] = 0.0;
                 st.cv_bot[js] = 0.0;
                 st.cv_ch0[js] = 0.0;
@@ -558,7 +557,7 @@ impl Simulation {
                     thomas(&b, &mut d, &e, &mut f);
                     let mut lconv = true;
                     for i in 0..n {
-                        if (ns > 1 && iter == 1) || false {
+                        if iter == 1 {
                             st.c_prev_o[i] = st.conc[js][i];
                         }
                         if st.l_linear[js] {
@@ -601,6 +600,9 @@ impl Simulation {
                 }
                 if !st.l_equil && st.l_linear[js] {
                     self.sol_sorbconc(st, js, dt);
+                }
+                if self.l_dual_perm {
+                    self.sol_dual_perm(st, js, dt);
                 }
                 self.sol_masstran(st, js, epsi);
                 // fluxes across the boundaries
@@ -659,6 +661,7 @@ impl Simulation {
         let mut peclet = 0.0f64;
         let mut courant = 0.0f64;
         let mut dt_max_c = 1e30f64;
+
         for i in (0..n).rev() {
             let j = i + 1;
             let m = self.mat[i];
@@ -682,10 +685,10 @@ impl Simulation {
             }
             let ro = st.ro[m];
             let frac = st.frac[m];
-			let p_base = st.pm[js][m].clone();
+            let p_base = st.pm[js][m].clone();
             let mut p = p_base.clone();
-			let mut diff_w = st.diff_w[js];
-			let mut diff_g = st.diff_g[js];
+            let mut diff_w = st.diff_w[js];
+            let mut diff_g = st.diff_g[js];
 
             if st.l_tdep && js < st.t_dep.len() {
                 let td = &st.t_dep[js];
@@ -701,8 +704,8 @@ impl Simulation {
                 let scale = |base: f64, ea: f64| if ea.abs() > 1e-12 { base * (ea * tt).exp() } else { base };
 
                 diff_w = scale(diff_w, td.diff_w);
-				diff_g = scale(diff_g, td.diff_g);
-				p.ks = scale(p_base.ks, td.ks);
+                diff_g = scale(diff_g, td.diff_g);
+                p.ks = scale(p_base.ks, td.ks);
                 p.nu = scale(p_base.nu, td.nu);
                 p.henry = scale(p_base.henry, td.henry);
                 p.mu_w = scale(p_base.mu_w, td.mu_w);
@@ -724,32 +727,29 @@ impl Simulation {
                     p.r_kd1 = scale(p_base.r_kd1, td.henry);
                 }
             }
+
             if st.l_moist {
                 let scale_m = |rate: f64, k: usize| -> f64 {
                     if rate.abs() < 1e-30 {
                         return rate;
                     }
                     if st.i_moist_dep == 2 {
-                        // Tabular interpolation (MoistDep.in)
                         if js < st.moist_tables.len() {
                             let factor = interp_moist_factor(&st.moist_tables[js], k, th_w);
                             rate * factor
                         } else {
                             rate
                         }
-                    } else {
-                        // Walker power law (i_moist_dep == 1)
-                        if js < st.w_dep.len() {
-                            let b = st.w_dep[js].exp_b[k];
-                            let th_ref = st.th_ref[js][m][k];
-                            if b.abs() > 1e-12 && th_ref > 1e-6 && th_w > 1e-6 {
-                                rate * (th_w / th_ref).powf(b)
-                            } else {
-                                rate
-                            }
+                    } else if js < st.w_dep.len() {
+                        let b = st.w_dep[js].exp_b[k];
+                        let th_ref = st.th_ref[js][m][k];
+                        if b.abs() > 1e-12 && th_ref > 1e-6 && th_w > 1e-6 {
+                            rate * (th_w / th_ref).powf(b)
                         } else {
                             rate
                         }
+                    } else {
+                        rate
                     }
                 };
 
@@ -765,13 +765,14 @@ impl Simulation {
             }
 
             let (xks, xnu, fexp, henry) = (p.ks, p.nu, p.beta, p.henry);
-            let (gam_l, gam_s, gam_g, gam_l1, gam_s1, gam_g1) = (p.mu_w, p.mu_s, p.mu_g, p.gam_w, p.gam_s, p.gam_g);
+            let (gam_l, gam_s, gam_g, gam_l1, gam_s1, _gam_g1) = (p.mu_w, p.mu_s, p.mu_g, p.gam_w, p.gam_s, p.gam_g);
             let (xmu_l, xmu_s, xmu_g, omega) = (p.mu0_w, p.mu0_s, p.mu0_g, p.omega);
             let (mut dsconc, mut dconc, mut sconc, mut sconc_o) = (1.0, 1.0, 1.0, 1.0);
             let (mut sconc_s, mut dsconc_s, mut sconc_os) = (1.0, 1.0, 1.0);
             let mut sconc_p = 1.0;
             let mut sconc_ps = 1.0;
             let mut c_mid = 0.0;
+
             if !st.l_linear[js] {
                 let c0 = st.conc[js][i];
                 c_mid = (c0 + st.c_new[i]) / 2.0;
@@ -798,6 +799,7 @@ impl Simulation {
                     }
                 }
             }
+
             if js > 0 && !st.l_linear[js - 1] {
                 let pp = parent.as_ref().unwrap();
                 let cprev = if last { st.conc[js - 1][i] } else { st.c_prev_o[i] };
@@ -809,9 +811,11 @@ impl Simulation {
                     sconc_ps = sp.powf(pp.beta - 1.0) / (1.0 + pp.nu * sp.powf(pp.beta));
                 }
             }
-            let _ = sconc_ps;
+            let _ = (sconc_o, sconc_os);
+
             let retard = (ro * frac * xks * dconc + th_g * henry) / th_w + 1.0;
             st.retard[i] = retard;
+
             // ---- dispersion
             let (mut tau_w, mut tau_g) = (1.0, 1.0);
             if st.tort {
@@ -850,7 +854,8 @@ impl Simulation {
                 }
             }
             st.disp[i] = disp;
-			// ---- Colloid / bacteria kinetics preparation
+
+            // ---- Colloid / bacteria kinetics preparation
             let mut r_ka1 = p.r_ka1;
             let mut r_ka2 = p.r_ka2;
             let mut psi1 = 1.0;
@@ -882,6 +887,33 @@ impl Simulation {
                 }
             }
 
+            // ---- Non-equilibrium parent product routing (s_product)
+            let s_product = if js > 0 {
+                let pp = parent.as_ref().unwrap();
+                if mob || self.i_dual_por > 0 {
+                    st.sorb[js - 1][i] * (th_imob * pp.mu_w + (1.0 - frac) * ro * pp.mu_s * pp.ks * sconc_ps)
+                } else if !st.l_bact {
+                    st.sorb[js - 1][i] * ro * pp.mu_s
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+
+            let c_parent_im = if st.l_nequil && js > 0 {
+                s_product
+            } else {
+                0.0
+            };
+
+            let c_parent_kin = if st.l_nequil && js > 0 {
+                let pp = parent.as_ref().unwrap();
+                pp.mu_s * ro * (if st.l_dual_neq { st.sorb2[js - 1][i] } else { st.sorb[js - 1][i] })
+            } else {
+                0.0
+            };
+
             // ---- non-equilibrium sorbed phase
             let mut ssorb = st.sorb[js][i];
             let mut ssorb2 = st.sorb2[js][i];
@@ -896,24 +928,7 @@ impl Simulation {
                 let d_mob = 2.0 * a_mob + dt * (omega_eff + b_mob);
                 st.d_mob_i = d_mob;
 
-                let c_parent_im = if st.l_nequil && js > 0 {
-                    let pp = &st.pm[js - 1][m];
-                    let r_w = if pp.gam_w > 0.0 { pp.gam_w } else { pp.mu_w };
-                    let r_s = if pp.gam_s > 0.0 { pp.gam_s } else { pp.mu_s };
-                    st.sorb[js - 1][i] * (th_imob * r_w + (1.0 - frac) * ro * r_s * pp.ks * sconc_ps)
-                } else {
-                    0.0
-                };
-
-                let c_parent_kin = if st.l_nequil && js > 0 {
-                    let pp = &st.pm[js - 1][m];
-                    let r_s = if pp.gam_s > 0.0 { pp.gam_s } else { pp.mu_s };
-                    r_s * ro * (if st.l_dual_neq { st.sorb2[js - 1][i] } else { st.sorb[js - 1][i] })
-                } else {
-                    0.0
-                };
-
-                if last && iter == 1 {
+                if last {
                     if st.l_bact {
                         if st.l_linear[js] {
                             st.sorb[js][i] = ((2.0 - dt * (p.r_kd1 + gam_s + gam_s1)) * st.sorb[js][i]
@@ -1000,7 +1015,6 @@ impl Simulation {
                     ssorb2 = st.sorb_n2[i];
                 }
             }
-            let _ = sconc_os;
 
             // ---- zero-order coefficient
             let gamma_w = if self.i_dual_por > 0 || self.l_dual_perm { self.sink_im[i] } else { 0.0 };
@@ -1012,7 +1026,7 @@ impl Simulation {
             if self.l_dual_perm {
                 let w_f = self.w_fracture.max(0.001);
                 let c_matrix = st.conc_m[js][i];
-                let alpha_eff = (omega + self.alpha_dw) / w_f;
+                let alpha_eff = omega / w_f;
                 let gamma_adv = if gamma_w < 0.0 { -gamma_w * c_matrix / w_f } else { 0.0 };
                 g0 += alpha_eff * c_matrix + gamma_adv;
             } else if !st.l_equil {
@@ -1030,34 +1044,24 @@ impl Simulation {
                     g0 += omega * ro * ssorb;
                 }
             }
+
             if let Some(pp) = &parent {
                 let cprev = if last { st.conc[js - 1][i] } else { st.c_prev_o[i] };
-                let r_w = if pp.gam_w > 0.0 { pp.gam_w } else { pp.mu_w };
-                let r_s = if pp.gam_s > 0.0 { pp.gam_s } else { pp.mu_s };
-                let r_g = if pp.gam_g > 0.0 { pp.gam_g } else { pp.mu_g };
+                let (r_w, r_s, r_g) = (pp.mu_w, pp.mu_s, pp.mu_g);
 
                 let mut cg = cprev * (r_w * th_w + ro * frac * pp.ks * r_s * sconc_p + th_g * pp.henry * r_g);
                 let mut cg1 = cg;
                 if !st.l_equil {
-                    if mob || self.i_dual_por > 0 {
-                        let aa = st.sorb[js - 1][i] * (th_imob * r_w + (1.0 - frac) * ro * r_s * pp.ks * sconc_ps);
+                    if !st.l_nequil {
+                        cg += s_product;
+                    }
+                    cg1 += s_product;
+                    if st.l_dual_neq {
+                        let aa2 = r_s * ro * st.sorb2[js - 1][i];
                         if !st.l_nequil {
-                            cg += aa;
+                            cg += aa2;
                         }
-                        cg1 += aa;
-                        if st.l_dual_neq {
-                            let aa2 = r_s * ro * st.sorb2[js - 1][i];
-                            if !st.l_nequil {
-                                cg += aa2;
-                            }
-                            cg1 += aa2;
-                        }
-                    } else if !st.l_bact {
-                        let aa = r_s * ro * st.sorb[js - 1][i];
-                        if !st.l_nequil {
-                            cg += aa;
-                        }
-                        cg1 += aa;
+                        cg1 += aa2;
                     }
                 }
                 g0 += cg;
@@ -1070,10 +1074,10 @@ impl Simulation {
             let tr_adv_m = if gamma_w > 0.0 { gamma_w } else { 0.0 };
             let omega_m_eff = omega + tr_adv_m;
 
-            let mut g1 = -(gam_l + gam_l1) * th_w - (gam_s + gam_s1) * ro * frac * xks * sconc - (gam_g + gam_g1) * th_g * henry;
+            let mut g1 = -(gam_l + gam_l1) * th_w - (gam_s + gam_s1) * ro * frac * xks * sconc - (gam_g + p.gam_g) * th_g * henry;
             if self.l_dual_perm {
                 let w_f = self.w_fracture.max(0.001);
-                let alpha_eff = (omega + self.alpha_dw) / w_f;
+                let alpha_eff = omega / w_f;
                 let gamma_adv = if gamma_w > 0.0 { gamma_w / w_f } else { 0.0 };
                 g1 -= alpha_eff + gamma_adv;
             } else if !st.l_equil {
@@ -1087,7 +1091,7 @@ impl Simulation {
                     if last && st.l_linear[js] {
                         g1 += omega_im_eff * dt * omega_m_eff / st.d_mob_i;
                     }
-				} else if st.l_dual_neq {
+                } else if st.l_dual_neq {
                     g1 -= omega_m_eff + omega * ro * (1.0 - frac) * sconc * xks;
                     if last && st.l_linear[js] {
                         g1 += omega_im_eff * dt * omega_m_eff / st.d_mob_i
@@ -1101,7 +1105,28 @@ impl Simulation {
                 }
             }
             st.g1[i] = g1;
-			
+
+            // Direct port of SOLUTE.FOR line 285: First-order reaction sink q1(i)
+            let mut q1 = (-(gam_l + gam_l1) * th_w
+                - (gam_s + gam_s1) * ro * frac * xks * sconc
+                - (gam_g + p.gam_g) * th_g * henry)
+                * st.conc[js][i];
+
+            if !st.l_equil {
+                if (mob || self.i_dual_por > 0) && !st.l_bact {
+                    let th_im = if self.i_dual_por > 0 { self.th_new_im[i] } else { th_imob };
+                    q1 -= st.sorb[js][i] * (th_im * (p.mu_w + p.gam_w) + (1.0 - frac) * ro * xks * sconc_s * (gam_s + gam_s1));
+                    if st.l_dual_neq {
+                        q1 -= (gam_s + gam_s1) * ro * st.sorb2[js][i];
+                    }
+                } else if !st.l_bact {
+                    q1 -= (gam_s + gam_s1) * ro * st.sorb[js][i];
+                } else if st.l_bact {
+                    q1 -= ro * (gam_s + gam_s1) * (st.sorb[js][i] + st.sorb2[js][i]);
+                }
+            }
+            st.q1[i] = q1;
+
             // ---- velocity correction (gas-phase diffusion, varying Henry constant with temperature)
             let temp_at = |idx: usize| -> f64 {
                 if last {
@@ -1144,6 +1169,7 @@ impl Simulation {
             } else {
                 st.v_n[i] -= vcorr;
             }
+
             // ---- Peclet / Courant / upwind weights
             if i != n - 1 {
                 let dx = self.x[j] - self.x[i];
@@ -1350,10 +1376,10 @@ impl Simulation {
             st.cv_chr[js] += epsi * dx * (st.s_sink[i] + st.s_sink[j]) / 2.0;
 
             if self.l_dual_perm {
-                let alpha_eff_i = self.sol.as_ref().map(|s| s.pm[js][self.mat[i]].omega).unwrap_or(0.0) + self.alpha_dw;
-                let alpha_eff_j = self.sol.as_ref().map(|s| s.pm[js][self.mat[j]].omega).unwrap_or(0.0) + self.alpha_dw;
-                let transf_i = alpha_eff_i * (st.conc[js][i] - st.conc_m[js][i]);
-                let transf_j = alpha_eff_j * (st.conc[js][j] - st.conc_m[js][j]);
+                let omega_i = st.pm[js][self.mat[i]].omega;
+                let omega_j = st.pm[js][self.mat[j]].omega;
+                let transf_i = omega_i * (st.conc[js][i] - st.conc_m[js][i]);
+                let transf_j = omega_j * (st.conc[js][j] - st.conc_m[js][j]);
                 st.cv_chim[js] += epsi * dx / 2.0 * (transf_i + transf_j);
             } else if !st.l_equil {
                 let (mi, mj) = (self.mat[i], self.mat[j]);
@@ -1379,13 +1405,13 @@ impl Simulation {
         }
     }
 
-    /// Sorbed concentration at the end of the step for linear non-equilibrium transport.
+    /// Sorbed concentration at the end of the step for linear non-equilibrium transport (port of SorbConc in SOLUTE.FOR).
     fn sol_sorbconc(&self, st: &mut SoluteState, js: usize, dt: f64) {
         for i in 0..self.n {
             let m = self.mat[i];
-			
             let p_base = &st.pm[js][m];
             let mut p = p_base.clone();
+
             if st.l_tdep && js < st.t_dep.len() {
                 let td = &st.t_dep[js];
                 let temp_val = self.heat.as_ref().map(|h| h.temp_n[i]).unwrap_or(20.0);
@@ -1405,8 +1431,10 @@ impl Simulation {
                     p.r_kd2 = scale(p_base.r_kd2, td.omega);
                 }
             }
+
             let th_w = st.th_n[i];
             let theta = (th_w - st.th_im[m]).max(0.001);
+
             if st.l_moist {
                 let scale_m = |rate: f64, k: usize| -> f64 {
                     if rate.abs() < 1e-30 {
@@ -1448,55 +1476,79 @@ impl Simulation {
                 }
                 st.sorb[js][i] += dt * r_ka1 * theta * st.conc[js][i] / ro / (2.0 + dt * (p.r_kd1 + gam_s + gam_s1));
                 st.sorb2[js][i] += dt * r_ka2 * theta * st.conc[js][i] / ro / (2.0 + dt * (p.r_kd2 + gam_s + gam_s1));
-            } else if st.l_mob_im[m] || self.i_dual_por > 0 {
+            } else if st.l_mob_im[m] || self.i_dual_por > 0 || st.l_dual_neq {
                 let gamma_w = if self.i_dual_por > 0 { self.sink_im[i] } else { 0.0 };
                 let tr_adv_m = if gamma_w > 0.0 { gamma_w } else { 0.0 };
                 let tr_adv_im = if gamma_w < 0.0 { -gamma_w } else { 0.0 };
                 let omega_eff = omega + tr_adv_m;
 
-                let th_im = st.th_im[m];
+                let th_im = if self.i_dual_por > 0 { self.th_new_im[i] } else { st.th_im[m] };
                 let a_mob = th_im + (1.0 - frac) * ro * xks;
                 let b_mob = th_im * (p.mu_w + p.gam_w) + (gam_s + gam_s1) * ro * (1.0 - frac) * xks + tr_adv_im;
                 let d_mob = 2.0 * a_mob + dt * (omega_eff + b_mob);
 
-                st.sorb[js][i] += dt * omega_eff * st.conc[js][i] / d_mob;
-            } else if st.l_dual_neq {
-                let gamma_w = if self.i_dual_por > 0 { self.sink_im[i] } else { 0.0 };
-                let tr_adv_m = if gamma_w > 0.0 { gamma_w } else { 0.0 };
-                let tr_adv_im = if gamma_w < 0.0 { -gamma_w } else { 0.0 };
-                let omega_eff = omega + tr_adv_m;
+                // Parent decay into immobile daughter domain (SOLUTE.FOR line 245)
+                let s_product = if st.l_nequil && js > 0 {
+                    let pp = &st.pm[js - 1][m];
+                    st.sorb[js - 1][i] * (th_im * pp.mu_w + (1.0 - frac) * ro * pp.mu_s * pp.ks)
+                } else {
+                    0.0
+                };
+                let e_mob = th_im * p.mu0_w + (1.0 - frac) * ro * p.mu0_s + s_product;
 
-                let th_im = st.th_im[m];
-                let a_mob = th_im + (1.0 - frac) * ro * xks;
-                let b_mob = th_im * (p.mu_w + p.gam_w) + (gam_s + gam_s1) * ro * (1.0 - frac) * xks + tr_adv_im;
-                let d_mob = 2.0 * a_mob + dt * (omega_eff + b_mob);
-                
-                // 1. Update physical immobile domain
-                st.sorb[js][i] += dt * omega_eff * st.conc[js][i] / d_mob;
-                // 2. Update chemical kinetic mobile domain
-                st.sorb2[js][i] += dt * omega * (1.0 - frac) * xks * st.conc[js][i] / (2.0 + dt * (omega + gam_s + gam_s1));
+                let g_mob0 = (2.0 * a_mob - dt * (omega_eff + b_mob)) / d_mob;
+                st.sorb[js][i] = st.sorb[js][i] * g_mob0 + dt * (omega_eff * st.conc[js][i] + 2.0 * e_mob) / d_mob;
+
+                if st.l_dual_neq {
+                    let s_product_kin = if st.l_nequil && js > 0 {
+                        let pp = &st.pm[js - 1][m];
+                        pp.mu_s * ro * st.sorb2[js - 1][i]
+                    } else {
+                        0.0
+                    };
+                    let s_old2 = st.sorb2[js][i];
+                    st.sorb2[js][i] = ((2.0 - (omega + gam_s + gam_s1) * dt) * s_old2
+                        + dt * (1.0 - frac) * omega * xks * st.conc[js][i]
+                        + dt * (1.0 - frac) * (2.0 * p.mu0_s)
+                        + 2.0 * dt * s_product_kin)
+                        / (2.0 + dt * (omega + gam_s + gam_s1));
+                }
             } else {
-                st.sorb[js][i] += dt * omega * (1.0 - frac) * xks * st.conc[js][i] / (2.0 + dt * (omega + gam_s + gam_s1));
+                let s_product_kin = if st.l_nequil && js > 0 {
+                    let pp = &st.pm[js - 1][m];
+                    pp.mu_s * ro * st.sorb[js - 1][i]
+                } else {
+                    0.0
+                };
+                let s_old = st.sorb[js][i];
+                st.sorb[js][i] = ((2.0 - (omega + gam_s + gam_s1) * dt) * s_old
+                    + dt * (1.0 - frac) * omega * xks * st.conc[js][i]
+                    + dt * (1.0 - frac) * (2.0 * p.mu0_s)
+                    + 2.0 * dt * s_product_kin)
+                    / (2.0 + dt * (omega + gam_s + gam_s1));
             }
+        }
+    }
 
-            if self.l_dual_perm {
-                let c_f_new = st.conc[js][i];
-                let c_f_old = st.c_prev_o[i];
-                let c_f_mid = (c_f_old + c_f_new) / 2.0;
-                let c_m = st.conc_m[js][i];
+    /// Solute exchange Gamma_s between fracture and matrix continua in dual-permeability systems.
+    fn sol_dual_perm(&self, st: &mut SoluteState, js: usize, dt: f64) {
+        for i in 0..self.n {
+            let m = self.mat[i];
+            let omega = st.pm[js][m].omega;
+            let c_f_new = st.conc[js][i];
+            let c_f_old = st.c_prev_o[i];
+            let c_f_mid = (c_f_old + c_f_new) / 2.0;
+            let c_m = st.conc_m[js][i];
 
-                let alpha = omega + self.alpha_dw;
-                let gamma_w = self.sink_im[i];
-                let c_star = if gamma_w >= 0.0 { c_f_mid } else { c_m };
-                let gamma_s = gamma_w * c_star + alpha * (c_f_mid - c_m);
+            let gamma_w = self.sink_im[i];
+            let c_star = if gamma_w >= 0.0 { c_f_mid } else { c_m };
+            let gamma_s = gamma_w * c_star + omega * (c_f_mid - c_m);
 
-                let w_m = (1.0 - self.w_fracture).max(0.001);
-                let th_matrix = self.th_matrix_new[i].max(0.001);
+            let w_m = (1.0 - self.w_fracture).max(0.001);
+            let th_matrix = self.th_matrix_new[i].max(0.001);
 
-                // Exact match to explicit c_m sink in fracture FE equation: delta_M_m = dt * gamma_s
-                let delta_c_m = (dt * gamma_s) / (w_m * th_matrix);
-                st.conc_m[js][i] = (c_m + delta_c_m).max(0.0);
-            }
+            let delta_c_m = (dt * gamma_s) / (w_m * th_matrix);
+            st.conc_m[js][i] = (c_m + delta_c_m).max(0.0);
         }
     }
 
@@ -1705,7 +1757,7 @@ pub fn blocking(i_psi: i32, s_max: f64, x_depth: f64, ss: f64, d_c: f64, s_max2:
 			}
 		}
 		3 => {
-			// Random Sequential Adsorption (RSA)
+			// Random Sequential Adsorption (RSA) - SOLUTE.FOR line 1032
 			if s_max > 0.0 {
 				let b_inf = 1.0 / s_max;
 				let s_inf = 0.546;
@@ -1714,7 +1766,8 @@ pub fn blocking(i_psi: i32, s_max: f64, x_depth: f64, ss: f64, d_c: f64, s_max2:
 				if ss <= 0.8 * s_max {
 					psi = 1.0 - 4.0 * const_val + 3.08 * const_val.powi(2) + 1.4069 * const_val.powi(3);
 				} else {
-					psi = (1.0 - b_inf * ss).powi(3) / (2.0 * m_inf.powi(2) * b_inf.powi(3));
+					let num = (1.0 - b_inf * ss).max(0.0).powi(3);
+					psi = num / (2.0 * m_inf.powi(2) * b_inf.powi(3));
 				}
 				psi = psi.max(0.0);
 			}

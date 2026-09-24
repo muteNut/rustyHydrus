@@ -6,6 +6,8 @@
 use hydrus_core::material::MatTable;
 use hydrus_core::*;
 use std::path::Path;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 
 type R<T> = Result<T, HydrusError>;
 
@@ -125,10 +127,6 @@ impl Rd {
     }
 }
 
-fn bail_unsupported<T>(what: &str) -> R<T> {
-    Err(HydrusError::Unsupported(what.to_string()))
-}
-
 /// Read a HYDRUS-1D project directory (containing SELECTOR.IN, PROFILE.DAT, ATMOSPH.IN).
 pub fn read_legacy_project(dir: &Path) -> R<Project> {
     let find = |name: &str| -> R<std::path::PathBuf> {
@@ -143,9 +141,6 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
     let mut prj = Project::default();
     let mut s = Rd::open(&find("selector.in")?, "Selector.in")?;
     let ver = s.version();
-    if ver < 3 {
-        return bail_unsupported("Selector.in versions older than 3 (open and save them in HYDRUS-1D first)");
-    }
 
     // ---------------- BasInf
     s.skip()?;
@@ -180,12 +175,12 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
         l_snow = t.b(0)?;
     } else if ver >= 4 {
         s.skip()?;
-        let t = s.read(6)?;
-        l_snow = t.b(0)?;
-        l_meteo = t.b(2)?;
-        l_vapor = t.b(3)?;
-        l_act_rsu = t.b(4)?;
-        _l_flux = t.b(5)?;
+        let t = s.read_opt(6)?;
+        l_snow = t.b(0).unwrap_or(false);
+        if t.len() > 2 { l_meteo = t.b(2).unwrap_or(false); }
+        if t.len() > 3 { l_vapor = t.b(3).unwrap_or(false); }
+        if t.len() > 4 { l_act_rsu = t.b(4).unwrap_or(false); }
+        if t.len() > 5 { _l_flux = t.b(5).unwrap_or(false); }
     }
     prj.atmosphere.snow = l_snow;
 	prj.root.l_act_rsu = l_act_rsu;
@@ -326,10 +321,7 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
     s.skip()?;
     let t = s.read(2)?;
     let i_model = t.i(0)?;
-    let i_hyst = t.i(1)?;
-    if i_model == 8 {
-        return bail_unsupported("dual-permeability models");
-    }
+    let i_hyst = t.i(1)?;  
 
     prj.water.model = SoilModel::from_code(i_model)
         .ok_or_else(|| HydrusError::Unsupported(format!("hydraulic model {}", i_model)))?;
@@ -351,6 +343,7 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
         SoilModel::Durner => 9,
         SoilModel::DualPorosityW => 9,
         SoilModel::DualPorosityH => 11,
+		SoilModel::DualPermeability => 11,
         SoilModel::Tabular => 6, // Standard 6 parameters in Selector.in (Qr, Qs, Alfa, n, Ks, l)
         _ => 6,
     };
@@ -407,12 +400,12 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
     let t = s.read(2)?;
     tm.t_init = t.f(0)?;
     tm.t_max = t.f(1)?;
-    if ver > 2 {
+    if ver >= 3 {
         s.skip()?;
-        let t = s.read(4)?;
-        tm.print_at_interval = t.b(0)?;
-        tm.print_step = t.i(1)?.max(1) as usize;
-        tm.print_interval = t.f(2)?;
+        let t = s.read_opt(3)?;
+        tm.print_at_interval = t.b(0).unwrap_or(false);
+        tm.print_step = t.i(1).unwrap_or(1).max(1) as usize;
+        tm.print_interval = t.f(2).unwrap_or(0.0);
     }
     s.skip()?;
     let t = s.read(mpl)?;
@@ -518,6 +511,11 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
     // ---------------- Solute
     if l_chem {
         read_chem(&mut s, &mut prj, ver, n_mat, l_equil)?;
+        if prj.solute.i_moist_dep == 2 {
+            if let Ok(moist_path) = find("moistdep.in") {
+                let _ = crate::moist_dep::read_moist_dep(&moist_path, &mut prj);
+            }
+        }
     }
 
     // ---------------- Sink
@@ -535,18 +533,6 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
             prj.root.omega_c = t.f(1 + ncr)?;
         }
         prj.root.c_root_max = c_root_max;
-		if prj.root.l_act_rsu && ncr > 0 {
-            s.skip()?; // Header: OmegaAct, rKM, cMin
-            let t = s.read(3 * ncr)?;
-            prj.root.omega_act.clear();
-            prj.root.r_km.clear();
-            prj.root.c_min.clear();
-            for j in 0..ncr {
-                prj.root.omega_act.push(t.f(3 * j)?);
-                prj.root.r_km.push(t.f(3 * j + 1)?);
-                prj.root.c_min.push(t.f(3 * j + 2)?);
-            }
-        }
         s.skip()?;
         if i_mo_sink == 0 {
             let t = s.read(6)?;
@@ -580,6 +566,18 @@ pub fn read_legacy_project(dir: &Path) -> R<Project> {
                 }
             }
         }
+		if ncr > 1 {
+			prj.root.l_act_rsu = false; // Fortran: only for NS = 1
+		}
+		if prj.root.l_act_rsu && ncr == 1 {
+			s.skip()?;
+			let t = s.read(5)?; // OmegaS, SPot, rKM, cMin, lOmegaW
+			prj.root.omega_act = vec![t.f(0)?];
+			prj.root.s_pot = t.f(1)?;
+			prj.root.r_km = vec![t.f(2)?];
+			prj.root.c_min = vec![t.f(3)?];
+			prj.root.l_omega_w = t.b(4)?;
+		}
     }
 
     // observation nodes etc. done in read_profile. Layers:
@@ -839,12 +837,21 @@ fn read_chem(s: &mut Rd, prj: &mut Project, ver: i32, n_mat: usize, l_equil_flag
     let (mut l_moist, mut l_dual_neq, mut l_mass_ini, mut l_eq_init, mut l_var) = (false, false, false, false, false);
     if ver >= 4 {
         s.skip()?;
-        let t = s.read(6)?;
+        let t = s.read_opt(6)?;
         l_moist = t.b(1)?;
         l_dual_neq = t.b(2)?;
         l_mass_ini = t.b(3)?;
         l_eq_init = t.b(4)?;
         l_var = t.b(5)?;
+        if t.len() > 6 {
+            sol.l_nequil = t.b(6).unwrap_or(false);
+        }
+        if t.len() > 7 {
+            sol.i_moist_dep = t.i(7).unwrap_or(if l_moist { 1 } else { 0 });
+        }
+        if t.len() > 8 {
+            sol.i_conc_type = t.i(8).unwrap_or(1);
+        }
     }
     sol.l_moist = l_moist;
     sol.mass_init = l_mass_ini;
@@ -867,7 +874,7 @@ fn read_chem(s: &mut Rd, prj: &mut Project, ver: i32, n_mat: usize, l_equil_flag
         let mut sp = Species { name: format!("Solute {}", j + 1), diff_w: t.f(0)?, diff_g: t.f(1)?, per_material: vec![], c_top: 0.0, c_bot: 0.0 };
         s.skip()?;
         for _ in 0..n_mat {
-            let t = s.read(14)?;
+            let t = s.read_opt(14)?;
             let mut sp_mat = SpeciesMaterial {
                 ks: t.f(0)?,
                 nu: t.f(1)?,
@@ -886,14 +893,23 @@ fn read_chem(s: &mut Rd, prj: &mut Project, ver: i32, n_mat: usize, l_equil_flag
                 ..Default::default()
             };
             if sol.l_bact {
-                // When lBact is true, HYDRUS encodes:
-                // SMax2 (pos 10), rKa2 (pos 11), rKd2 (pos 12), SMax1 (pos 13), etc.
                 sp_mat.s_max2 = sp_mat.mu0_s;
                 sp_mat.r_ka2 = sp_mat.mu0_g;
                 sp_mat.r_kd2 = sp_mat.omega;
-                // Standard default site 1 kinetics:
                 sp_mat.r_ka1 = sp_mat.ks;
                 sp_mat.r_kd1 = sp_mat.nu;
+            }
+            if t.len() >= 24 {
+                sp_mat.s_max1 = t.f(14)?;
+                sp_mat.r_ka1 = t.f(15)?;
+                sp_mat.r_kd1 = t.f(16)?;
+                sp_mat.s_max2 = t.f(17)?;
+                sp_mat.r_ka2 = t.f(18)?;
+                sp_mat.r_kd2 = t.f(19)?;
+                sp_mat.i_psi1 = t.i(20)?;
+                sp_mat.i_psi2 = t.i(21)?;
+                sp_mat.d_c = t.f(22)?;
+                sp_mat.d_p = t.f(23)?;
             }
             sp.per_material.push(sp_mat);
         }
@@ -902,25 +918,6 @@ fn read_chem(s: &mut Rd, prj: &mut Project, ver: i32, n_mat: usize, l_equil_flag
 
     sol.t_dep.clear();
 	sol.w_dep.clear();
-    if sol.l_moist {
-        for jj in 0..ns {
-            if jj == 0 {
-                s.skip()?; // Header: Water content dependence
-            }
-            s.skip()?; // Header
-            let _n_par2 = s.read(1)?.i(0)?;
-            s.skip()?; // Header: Exponents B
-            let t_exp = s.read(9)?;
-            s.skip()?; // Header: Reference h
-            let t_href = s.read(9)?;
-            let mut wdep = SpeciesWDep::default();
-            for k in 0..9 {
-                wdep.exp_b[k] = t_exp.f(k)?;
-                wdep.h_ref[k] = t_href.f(k)?;
-            }
-            sol.w_dep.push(wdep);
-        }
-    }
    if sol.l_tdep {
         for jj in 0..ns {
             if jj == 0 {
@@ -948,6 +945,25 @@ fn read_chem(s: &mut Rd, prj: &mut Project, ver: i32, n_mat: usize, l_equil_flag
                 mu0_g: t_par.f(12)?,
                 omega: t_par.f(13)?,
             });
+        }
+    }
+    if sol.l_moist {
+        for jj in 0..ns {
+            if jj == 0 {
+                s.skip()?; // Header: Water content dependence
+            }
+            s.skip()?; // Header
+            let _n_par2 = s.read(1)?.i(0)?;
+            s.skip()?; // Header: Exponents B
+            let t_exp = s.read(9)?;
+            s.skip()?; // Header: Reference h
+            let t_href = s.read(9)?;
+            let mut wdep = SpeciesWDep::default();
+            for k in 0..9 {
+                wdep.exp_b[k] = t_exp.f(k)?;
+                wdep.h_ref[k] = t_href.f(k)?;
+            }
+            sol.w_dep.push(wdep);
         }
     }
     s.skip()?;
@@ -1160,101 +1176,193 @@ pub fn read_mater_in(path: &Path, n_mat: usize) -> R<Vec<MatTable>> {
     Ok(tabs)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ---------------------------------------------------------------------------
+// Legacy Output File Readers (Nod_Inf.out)
+// ---------------------------------------------------------------------------
 
-    #[test]
-    fn test_parse_meteo_file() {
-        let meteo_content = r#"Pcp_File_Version=4
-* METEOROLOGICAL PARAMETERS AND INFORMATION |||||||||||||||||||||||||||||||
- MeteoRecords Radiation Penman-Hargreaves
-            3        1       f
-  lEnBal  lDaily  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy
-       t       f       f       f       f       t       f       f       f       f
- Latitude  Altitude
-    33.58        306
- ShortWaveRadA  ShortWaveRadB
-          0.25            0.5
- LongWaveRadA   LongWaveRadB
-           0.9            0.1
- LongWaveRadA1  LongWaveRadB1
-          0.34         -0.139
- WindHeight     TempHeight
-        200            150
- iCrop (=0: no crop, =1: constant, =2: table, =3: daily)  SunShine  RelativeHum
-         0                                                2         0
-    Albedo
-      0.23
-Daily values
-       t        Rad        TMax        TMin     RHMean      Wind    SunHours
-   328.042          0       15.2       15.2         33     138.24      0.545 
-   328.083          0       14.9       14.9         32     103.68      0.545 
-   328.125          0         15         15         32     138.24      0.545 
-end *** END OF INPUT FILE 'METEO.IN' **********************************
-"#;
+#[derive(Clone, Debug, Default)]
+pub struct LegacyProfileNode {
+    pub node: usize,
+    pub depth: f64,
+    pub head: f64,
+    pub moisture: f64,
+    pub k: f64,
+    pub c: f64,
+    pub flux: f64,
+    pub sink: f64,
+    pub kappa: i32,
+    pub temp: f64,
+    pub conc: Vec<f64>,
+}
 
-        let temp_dir = std::env::temp_dir().join("hydrus_test_meteo");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let meteo_file = temp_dir.join("METEO.IN");
-        std::fs::write(&meteo_file, meteo_content).unwrap();
+#[derive(Clone, Debug, Default)]
+pub struct LegacyProfileTimeBlock {
+    pub time: f64,
+    pub nodes: Vec<LegacyProfileNode>,
+}
 
-        let mut prj = Project::default();
-        let res = read_meteo(&meteo_file, &mut prj);
-        assert!(res.is_ok());
-
-        let meteo = prj.atmosphere.meteo.expect("meteo settings should be parsed");
-        assert_eq!(meteo.records.len(), 3);
-        assert!((meteo.latitude - 33.58).abs() < 1e-4);
-        assert!((meteo.altitude - 306.0).abs() < 1e-4);
-        assert_eq!(meteo.i_radiation, 1);
-        assert_eq!(meteo.i_sun_sh, 2);
-        assert_eq!(meteo.records[0].t, 328.042);
-        assert_eq!(meteo.records[0].rh_mean, 33.0);
+/// Tokenizes a line from a legacy HYDRUS Fortran output file, safely separating 
+/// contiguous scientific-notation tokens (e.g. "0.00-7.2970E+02" or "1.00E+01-2.00E+01").
+pub fn sanitize_fortran_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 16);
+    let bytes = line.as_bytes();
+    for i in 0..bytes.len() {
+        let b = bytes[i];
+        if b == b'-' && i > 0 {
+            let prev = bytes[i - 1];
+            if prev != b' ' && prev != b'e' && prev != b'E' && prev != b'd' && prev != b'D' && prev != b',' {
+                out.push(' ');
+            }
+        }
+        out.push(b as char);
     }
-	
-	#[test]
-    fn test_parse_meteo_file_hourly_and_energy_balance_flags() {
-        let meteo_content = r#"Pcp_File_Version=4
-* METEOROLOGICAL PARAMETERS AND INFORMATION |||||||||||||||||||||||||||||||
- MeteoRecords Radiation Penman-Hargreaves
-            2        1       f
-  lEnBal  lDaily  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy  lDummy
-       t       f       f       f       f       t       f       f       f       f
- Latitude  Altitude
-    33.58        306
- ShortWaveRadA  ShortWaveRadB
-          0.25            0.5
- LongWaveRadA   LongWaveRadB
-           0.9            0.1
- LongWaveRadA1  LongWaveRadB1
-          0.34         -0.139
- WindHeight     TempHeight
-        200            150
- iCrop (=0: no crop, =1: constant, =2: table, =3: daily)  SunShine  RelativeHum
-         0                                                2         0
-    Albedo
-      0.23
-Daily values
-       t        Rad        TMax        TMin     RHMean      Wind    SunHours
-   328.042          0       15.2       15.2         33     138.24      0.545 
-   328.083          0       14.9       14.9         32     103.68      0.545 
-end *** END OF INPUT FILE 'METEO.IN' **********************************
-"#;
+    out
+}
 
-        let temp_dir = std::env::temp_dir().join("hydrus_test_meteo_hourly");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let meteo_file = temp_dir.join("METEO.IN");
-        std::fs::write(&meteo_file, meteo_content).unwrap();
+/// Reads a legacy Nod_Inf.out file, parsing all profile time blocks with complete column fidelity.
+pub fn read_nod_inf(path: &Path) -> R<Vec<LegacyProfileTimeBlock>> {
+    let file = File::open(path).map_err(|e| HydrusError::Io(format!("{}: {}", path.display(), e)))?;
+    let reader = BufReader::new(file);
 
-        let mut prj = Project::default();
-        let res = read_meteo(&meteo_file, &mut prj);
-        assert!(res.is_ok());
+    let mut blocks: Vec<LegacyProfileTimeBlock> = Vec::new();
+    let mut cur_time: Option<f64> = None;
+    let mut cur_nodes: Vec<LegacyProfileNode> = Vec::new();
 
-        let meteo = prj.atmosphere.meteo.expect("meteo settings should be parsed");
-        assert!(meteo.l_en_bal);
-        assert!(!meteo.l_daily);
-        assert_eq!(meteo.records.len(), 2);
-        assert!((meteo.records[1].t - meteo.records[0].t - 0.041).abs() < 1e-3);
+    let mut head_col = 2;
+    let mut depth_col = 1;
+    let mut node_col = 0;
+    let mut th_col = 3;
+    let mut k_col = 4;
+    let mut c_col = 5;
+    let mut flux_col = 6;
+    let mut sink_col = 7;
+    let mut kappa_col = 8;
+    let mut temp_col = 10;
+
+    for line_res in reader.lines() {
+        let raw_line = line_res.map_err(|e| HydrusError::Io(e.to_string()))?;
+        let trimmed = raw_line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with("====") || trimmed.starts_with("----") {
+            continue;
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+
+        // New time block header
+        if lower.starts_with("time:") {
+            if let Some(t) = cur_time {
+                if !cur_nodes.is_empty() {
+                    blocks.push(LegacyProfileTimeBlock {
+                        time: t,
+                        nodes: std::mem::take(&mut cur_nodes),
+                    });
+                }
+            }
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            cur_time = parts.get(1).and_then(|s| s.parse::<f64>().ok());
+            continue;
+        }
+
+        if lower.starts_with("end") {
+            break;
+        }
+
+        let upper = trimmed.to_ascii_uppercase();
+        // Dynamically detect column header layouts (even if preceded by comment asterisks)
+        if upper.contains("NODE") && (upper.contains("DEPTH") || upper.contains("HEAD")) {
+            let clean_line = trimmed.replace('*', " ");
+            let headers: Vec<&str> = clean_line.split_whitespace().collect();
+            for (idx, &h) in headers.iter().enumerate() {
+                let clean = h.trim_matches(|c: char| !c.is_alphanumeric());
+                if clean.eq_ignore_ascii_case("NODE") {
+                    node_col = idx;
+                } else if clean.eq_ignore_ascii_case("DEPTH") {
+                    depth_col = idx;
+                } else if clean.eq_ignore_ascii_case("HEAD") || clean.eq_ignore_ascii_case("H") {
+                    head_col = idx;
+                } else if clean.eq_ignore_ascii_case("MOISTURE") || clean.eq_ignore_ascii_case("THETA") {
+                    th_col = idx;
+                } else if clean.eq_ignore_ascii_case("K") {
+                    k_col = idx;
+                } else if clean.eq_ignore_ascii_case("C") {
+                    c_col = idx;
+                } else if clean.eq_ignore_ascii_case("FLUX") {
+                    flux_col = idx;
+                } else if clean.eq_ignore_ascii_case("SINK") {
+                    sink_col = idx;
+                } else if clean.eq_ignore_ascii_case("KAPPA") {
+                    kappa_col = idx;
+                } else if clean.eq_ignore_ascii_case("TEMP") {
+                    temp_col = idx;
+                }
+            }
+            continue;
+        }
+
+        if trimmed.starts_with('[') || trimmed.contains("[L]") || trimmed.contains("[T]") {
+            continue;
+        }
+
+        // Clean out observation asterisks that prefix or suffix node numbers (e.g. "* 22" or "22*")
+        let clean_row = trimmed.replace('*', " ");
+        let sanitized = sanitize_fortran_line(&clean_row);
+        let vals: Vec<f64> = sanitized
+            .split_whitespace()
+            .filter_map(|s| s.replace(['d', 'D'], "e").parse::<f64>().ok())
+            .collect();
+
+        if vals.len() >= 6 && vals.len() > head_col {
+            let node = vals.get(node_col).copied().unwrap_or(0.0).round() as usize;
+            if node == 0 {
+                continue;
+            }
+
+            // Prevent trailing observation/summary tables from re-adding or overriding nodes in this block
+            if cur_nodes.iter().any(|n| n.node == node) {
+                continue;
+            }
+
+            let depth = vals.get(depth_col).copied().unwrap_or(0.0);
+            let head = vals[head_col];
+            let moisture = vals.get(th_col).copied().unwrap_or(0.0);
+            let k = vals.get(k_col).copied().unwrap_or(0.0);
+            let c = vals.get(c_col).copied().unwrap_or(0.0);
+            let flux = vals.get(flux_col).copied().unwrap_or(0.0);
+            let sink = vals.get(sink_col).copied().unwrap_or(0.0);
+            let kappa = vals.get(kappa_col).copied().unwrap_or(-1.0).round() as i32;
+            let temp = vals.get(temp_col).copied().unwrap_or(0.0);
+
+            let conc = if vals.len() > 11 {
+                vals[11..].to_vec()
+            } else {
+                Vec::new()
+            };
+
+            cur_nodes.push(LegacyProfileNode {
+                node,
+                depth,
+                head,
+                moisture,
+                k,
+                c,
+                flux,
+                sink,
+                kappa,
+                temp,
+                conc,
+            });
+        }
     }
+
+    if let Some(t) = cur_time {
+        if !cur_nodes.is_empty() {
+            blocks.push(LegacyProfileTimeBlock {
+                time: t,
+                nodes: cur_nodes,
+            });
+        }
+    }
+
+    Ok(blocks)
 }

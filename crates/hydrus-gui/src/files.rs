@@ -95,6 +95,7 @@ impl FileDialog {
     fn go(&mut self, p: PathBuf) {
         if p.is_dir() {
             self.dir = p;
+            self.name.clear();
             self.refresh();
         }
     }
@@ -103,94 +104,102 @@ impl FileDialog {
         let mut result = DialogResult::Open;
         let mut open = true;
         let mut nav: Option<PathBuf> = None;
-        Window::new(self.title.clone()).open(&mut open).collapsible(false).default_size([620.0, 460.0]).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("⬆ Up").clicked() {
-                    if let Some(p) = self.dir.parent() {
-                        nav = Some(p.to_path_buf());
-                    }
-                }
-                if ui.button("🏠 Home").clicked() {
-                    nav = Some(home_dir());
-                }
-                #[cfg(windows)]
-                {
-                    for c in b'C'..=b'Z' {
-                        let d = format!("{}:\\", c as char);
-                        if std::path::Path::new(&d).exists() && ui.button(format!("{}:", c as char)).clicked() {
-                            nav = Some(PathBuf::from(d));
+        Window::new(self.title.clone())
+            .open(&mut open)
+            .collapsible(false)
+            .default_size([620.0, 460.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("⬆ Up").clicked() {
+                        if let Some(p) = self.dir.parent() {
+                            nav = Some(p.to_path_buf());
                         }
                     }
-                }
-                let r = ui.add(egui::TextEdit::singleline(&mut self.dir_text).desired_width(f32::INFINITY));
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    nav = Some(PathBuf::from(self.dir_text.clone()));
-                }
-            });
-            ui.separator();
-            ScrollArea::vertical().max_height(300.0).auto_shrink([false, false]).show(ui, |ui| {
-                for (name, is_dir) in self.entries.clone() {
-                    let label = if is_dir { format!("📁 {}", name) } else { format!("📄 {}", name) };
-                    let r = ui.selectable_label(self.name == name && !is_dir, label);
-                    if r.clicked() {
-                        if is_dir {
-                            if self.mode == Mode::PickDir {
-                                self.name = name.clone();
+                    if ui.button("🏠 Home").clicked() {
+                        nav = Some(home_dir());
+                    }
+                    #[cfg(windows)]
+                    {
+                        for c in b'C'..=b'H' {
+                            let d = format!("{}:\\", c as char);
+                            if std::path::Path::new(&d).is_dir() && ui.button(format!("{}:", c as char)).clicked() {
+                                nav = Some(PathBuf::from(d));
                             }
-                        } else {
+                        }
+                    }
+                    let r = ui.add(egui::TextEdit::singleline(&mut self.dir_text).desired_width(f32::INFINITY));
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let p = PathBuf::from(self.dir_text.clone());
+                        if p.is_dir() {
+                            nav = Some(p);
+                        }
+                    }
+                });
+                ui.separator();
+                ScrollArea::vertical().max_height(300.0).auto_shrink([false, false]).show(ui, |ui| {
+                    for (name, is_dir) in self.entries.clone() {
+                        let label = if is_dir { format!("📁 {}", name) } else { format!("📄 {}", name) };
+                        let r = ui.selectable_label(self.name == name && !is_dir, label);
+                        if r.clicked() {
                             self.name = name.clone();
                         }
-                    }
-                    if r.double_clicked() && is_dir {
-                        nav = Some(self.dir.join(&name));
-                    }
-                }
-                if !self.err.is_empty() {
-                    ui.colored_label(egui::Color32::LIGHT_RED, &self.err);
-                }
-            });
-            ui.separator();
-            ui.horizontal(|ui| {
-                match self.mode {
-                    Mode::PickDir => {
-                        ui.label("Selected folder:");
-                        let sel = if self.name.is_empty() { self.dir.clone() } else { self.dir.join(&self.name) };
-                        ui.monospace(sel.display().to_string());
-                    }
-                    _ => {
-                        ui.label("File name:");
-                        ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(280.0));
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                let label = match self.mode {
-                    Mode::OpenFile => "Open",
-                    Mode::SaveFile => "Save",
-                    Mode::PickDir => "Select this folder",
-                };
-                if ui.button(label).clicked() {
-                    let p = match self.mode {
-                        Mode::PickDir => {
-                            if self.name.is_empty() {
-                                self.dir.clone()
-                            } else {
-                                self.dir.join(&self.name)
-                            }
+                        if r.double_clicked() && is_dir {
+                            nav = Some(self.dir.join(&name));
                         }
-                        _ => self.dir.join(&self.name),
-                    };
-                    if self.mode == Mode::OpenFile && !p.is_file() {
-                        self.err = "Please select an existing file.".into();
-                    } else {
-                        result = DialogResult::Chosen(p);
                     }
-                }
-                if ui.button("Cancel").clicked() {
-                    result = DialogResult::Cancel;
-                }
+                    if !self.err.is_empty() {
+                        ui.colored_label(egui::Color32::LIGHT_RED, &self.err);
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    match self.mode {
+                        Mode::PickDir => {
+                            ui.label("Selected folder:");
+                            let sel = if !self.name.is_empty() && self.dir.join(&self.name).is_dir() {
+                                self.dir.join(&self.name)
+                            } else {
+                                self.dir.clone()
+                            };
+                            ui.monospace(sel.display().to_string());
+                        }
+                        _ => {
+                            ui.label("File name:");
+                            ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(280.0));
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let label = match self.mode {
+                        Mode::OpenFile => "Open",
+                        Mode::SaveFile => "Save",
+                        Mode::PickDir => "Select this folder",
+                    };
+                    if ui.button(label).clicked() {
+                        let p = match self.mode {
+                            Mode::PickDir => {
+                                if !self.name.is_empty() && self.dir.join(&self.name).is_dir() {
+                                    self.dir.join(&self.name)
+                                } else {
+                                    self.dir.clone()
+                                }
+                            }
+                            _ => self.dir.join(&self.name),
+                        };
+                        if self.mode == Mode::OpenFile && !p.is_file() {
+                            self.err = "Please select an existing file.".into();
+                        } else if self.mode == Mode::PickDir && !p.is_dir() {
+                            self.err = "Please select a valid folder.".into();
+                        } else {
+                            result = DialogResult::Chosen(p);
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        result = DialogResult::Cancel;
+                    }
+                });
             });
-        });
+
         if let Some(p) = nav {
             self.name.clear();
             self.go(p);

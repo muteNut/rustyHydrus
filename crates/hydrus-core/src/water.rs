@@ -270,17 +270,20 @@ impl Simulation {
         let model = self.model;
         for i in 0..self.n {
             let m = self.mat[i];
-            let (hi1, hi2);
-            if self.kappa[i] == -1 {
-                hi1 = self.h_sat[m].min(self.h_temp[i] / self.ah[i]);
-                hi2 = self.h_sat[m].min(self.h_new[i] / self.ah[i]);
+            
+            // In WATFLOW.FOR: Effective scaling factor A = ah(i) * (if kappa == 1 { ahW(m) } else { 1.0 })
+            // However, when individual nodal scaling is active (ah != 1.0), ah already incorporates the scaling.
+            let a_scale = if self.kappa[i] == 1 && (self.ah[i] - 1.0).abs() < 1e-5 {
+                self.ah[i] * self.ah_w[m]
             } else {
-                hi1 = self.h_sat[m].min(self.h_temp[i] / self.ah[i] / self.ah_w[m]);
-                hi2 = self.h_sat[m].min(self.h_new[i] / self.ah[i] / self.ah_w[m]);
-            }
+                self.ah[i]
+            };
+
+            let hi1 = self.h_sat[m].min(self.h_temp[i] / a_scale);
+            let hi2 = self.h_sat[m].min(self.h_new[i] / a_scale);
             let him = 0.1 * hi1 + 0.9 * hi2;
 			
-			if self.model == SoilModel::Tabular {
+            if self.model == SoilModel::Tabular {
                 let (coni, capi, thei) = self.lookup_tabular(m, him);
                 self.con[i] = coni * self.ak[i] * self.ak_s[i];
                 self.cap[i] = capi * self.ath[i] * self.ath_s[i];
@@ -290,7 +293,7 @@ impl Simulation {
                 }
                 continue;
             }
-			
+
             let coni;
             if hi1 >= self.h_sat[m] && hi2 >= self.h_sat[m] {
                 coni = self.con_sat[m];
@@ -300,6 +303,7 @@ impl Simulation {
             } else {
                 coni = fk(model, him, &self.par_d[m]);
             }
+
             let (capi, thei);
             if him >= self.h_sat[m] {
                 capi = 0.0;
@@ -312,15 +316,28 @@ impl Simulation {
                 capi = fc(model, him, &self.par_d[m]);
                 thei = fq(model, him, &self.par_d[m]);
             }
+
             let (at, bt) = (1.0, 1.0);
             if self.kappa[i] == -1 {
                 self.con[i] = coni * self.ak[i] * bt * self.ak_s[i];
                 self.cap[i] = capi * self.ath[i] * self.ath_s[i] / self.ah[i] / at;
                 self.th_eq[i] = self.thr[m] + (thei - self.thr[m]) * self.ath[i] * self.ath_s[i];
             } else {
-                self.con[i] = self.con_r[i] + coni * self.ak[i] * bt * self.ak_s[i] * self.ak_w[m];
-                self.cap[i] = capi * self.ath[i] * self.ath_s[i] * self.ath_w[m] / self.ah[i] / self.ah_w[m] / at;
-                self.th_eq[i] = self.th_rr[i] + self.ath_w[m] * self.ath[i] * self.ath_s[i] * (thei - self.thr[m]);
+                // When individual nodal scaling is active, Dxz is already scaled.
+                let d_scale = if (self.ath[i] - 1.0).abs() < 1e-5 {
+                    self.ath_w[m] * self.ath[i]
+                } else {
+                    self.ath[i]
+                };
+                let k_scale = if (self.ak[i] - 1.0).abs() < 1e-5 {
+                    self.ak_w[m] * self.ak[i]
+                } else {
+                    self.ak[i]
+                };
+
+                self.con[i] = self.con_r[i] + coni * k_scale * bt * self.ak_s[i];
+                self.cap[i] = capi * d_scale * self.ath_s[i] / a_scale / at;
+                self.th_eq[i] = self.th_rr[i] + d_scale * self.ath_s[i] * (thei - self.thr[m]);
             }
             if iter == 0 {
                 self.con_o[i] = self.con[i];
@@ -577,12 +594,6 @@ impl Simulation {
             let mut cona = (self.con[i] + self.con[i - 1]) / 2.0;
             let mut conb = (self.con[i] + self.con[i + 1]) / 2.0;
             let b = (cona - conb) * grav;
-			if self.i_dual_por > 0 {
-				p[i] -= self.sink_im[i] * dx;
-			}
-			if self.l_dual_perm {
-            p[i] -= (self.sink_im[i] / w_f) * dx;
-			}
             if self.l_vapor {
                 cona += (self.con_vh[i] + self.con_vh[i - 1]) / 2.0;
                 conb += (self.con_vh[i] + self.con_vh[i + 1]) / 2.0;
@@ -592,6 +603,8 @@ impl Simulation {
             let f2 = self.cap[i] * dx / dt;
             r[i] = a2 + f2;
             p[i] = f2 * self.h_new[i] - (self.th_new[i] - self.th_old[i]) * dx / dt - b - self.sink[i] * dx;
+			if self.i_dual_por > 0 { p[i] -= self.sink_im[i] * dx; }
+			if self.l_dual_perm   { p[i] -= (self.sink_im[i] / w_f) * dx; }
             s[i] = a3;
             if self.l_vapor || self.prj.water.l_w_dep {
                 let mut con_ta = 0.0;
@@ -655,55 +668,83 @@ impl Simulation {
     fn solve(&mut self, sys: &Sys) {
         let n = self.n;
         let rmin = 1e-100;
-        // lower[i] = s[i-1]; diag = r; upper[i] = s[i]
-        let mut diag = sys.r.clone();
-        let mut rhs = sys.p.clone();
-        let mut upper = sys.s.clone();
-        let mut lower = vec![0.0; n];
-        for i in 1..n {
-            lower[i] = sys.s[i - 1];
-        }
-        // bottom row
+
+        let mut p = sys.p.clone();
+        let mut r = sys.r.clone();
+        let s = &sys.s;
+
+        let pb = sys.pb;
+        let mut rb = sys.rb;
+        let sb = sys.sb;
+
+        let pt = sys.pt;
+        let rt = sys.rt;
+        let st = sys.st;
+
+        // Forward
         if self.kod_bot >= 0 {
-            diag[0] = 1.0;
-            upper[0] = 0.0;
-            rhs[0] = self.h_bot;
+            p[1] -= s[0] * self.h_bot;
         } else {
-            diag[0] = sys.rb;
-            upper[0] = sys.sb;
-            rhs[0] = sys.pb;
+            if rb.abs() < rmin {
+                rb = rmin;
+            }
+            p[1] -= pb * s[0] / rb;
+            r[1] -= sb * s[0] / rb;
         }
-        // top row
+
+        for i in 2..n - 1 {
+            let mut r_prev = r[i - 1];
+            if r_prev.abs() < rmin {
+                r_prev = rmin;
+            }
+            p[i] -= p[i - 1] * s[i - 1] / r_prev;
+            r[i] -= s[i - 1] * s[i - 1] / r_prev;
+        }
+
         if self.kod_top > 0 {
-            diag[n - 1] = 1.0;
-            lower[n - 1] = 0.0;
-            rhs[n - 1] = self.h_top;
+            p[n - 2] -= s[n - 2] * self.h_top;
         } else {
-            diag[n - 1] = sys.rt;
-            lower[n - 1] = sys.st;
-            rhs[n - 1] = sys.pt;
-        }
-        // Thomas algorithm
-        for i in 1..n {
-            let mut d = diag[i - 1];
-            if d.abs() < rmin {
-                d = rmin;
+            let mut r_nm2 = r[n - 2];
+            if r_nm2.abs() < rmin {
+                r_nm2 = rmin;
             }
-            let f = lower[i] / d;
-            diag[i] -= f * upper[i - 1];
-            rhs[i] -= f * rhs[i - 1];
+            p[n - 1] = pt - p[n - 2] * st / r_nm2;
+            r[n - 1] = rt - s[n - 2] * st / r_nm2;
         }
-        let mut dn = diag[n - 1];
-        if dn.abs() < rmin {
-            dn = rmin;
+
+        // Back
+        let mut r_last = r[n - 2];
+        if r_last.abs() < rmin {
+            r_last = rmin;
         }
-        self.h_new[n - 1] = rhs[n - 1] / dn;
-        for i in (0..n - 1).rev() {
-            let mut d = diag[i];
-            if d.abs() < rmin {
-                d = rmin;
+
+        if self.kod_top > 0 {
+            self.h_new[n - 1] = self.h_top;
+            self.h_new[n - 2] = p[n - 2] / r_last;
+        } else {
+            let mut r_nm1 = r[n - 1];
+            if r_nm1.abs() < rmin {
+                r_nm1 = rmin;
             }
-            self.h_new[i] = (rhs[i] - upper[i] * self.h_new[i + 1]) / d;
+            self.h_new[n - 1] = p[n - 1] / r_nm1;
+            self.h_new[n - 2] = (p[n - 2] - s[n - 2] * self.h_new[n - 1]) / r_last;
+        }
+
+        for i in (1..n - 2).rev() {
+            let mut r_i = r[i];
+            if r_i.abs() < rmin {
+                r_i = rmin;
+            }
+            self.h_new[i] = (p[i] - s[i] * self.h_new[i + 1]) / r_i;
+        }
+
+        if self.kod_bot >= 0 {
+            self.h_new[0] = self.h_bot;
+        } else {
+            if rb.abs() < rmin {
+                rb = rmin;
+            }
+            self.h_new[0] = (pb - sb * self.h_new[1]) / rb;
         }
     }
 
@@ -807,8 +848,8 @@ impl Simulation {
                     }
                 }
                 let sys = self.build_system();
-                self.shift();
-                self.h_temp.copy_from_slice(&self.h_new);
+				self.shift();
+				self.h_temp.copy_from_slice(&self.h_new);
                 self.solve(&sys);
 				if self.l_dual_perm {
                     self.set_mat_matrix();

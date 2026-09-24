@@ -507,6 +507,8 @@ pub struct RootUptake {
     pub omega_act: Vec<f64>,
     pub r_km: Vec<f64>,
     pub c_min: Vec<f64>,
+	pub s_pot: f64,
+    pub l_omega_w: bool,
 }
 impl Default for RootUptake {
     fn default() -> Self {
@@ -528,6 +530,8 @@ impl Default for RootUptake {
 			omega_act: vec![0.0],
 			r_km: vec![0.0],
 			c_min: vec![0.0],
+			s_pot: 0.0, 
+			l_omega_w: false,
         }
     }
 }
@@ -1019,4 +1023,37 @@ pub struct MoistDepTable {
     /// Scaling reduction factors (one vector of length matching theta for each of the 9 reaction parameters)
     /// [mu_w, mu_s, mu_g, gam_w, gam_s, gam_g, mu0_w, mu0_s, mu0_g]
     pub factors: [Vec<f64>; 9],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RetentionBranch {
+    Drying,
+    Wetting,
+}
+
+impl RetentionBranch {
+    pub fn code(&self) -> i32 {
+        match self {
+            Self::Drying => -1,
+            Self::Wetting => 1,
+        }
+    }
+
+    pub fn from_code(code: i32) -> Self {
+        if code == 1 {
+            Self::Wetting
+        } else {
+            Self::Drying
+        }
+    }
+}
+
+impl Hysteresis {
+    /// Resolves the starting retention branch code (-1 for drying, +1 for wetting).
+    pub fn initial_branch_code(&self, init_kappa: i32) -> i32 {
+        match self {
+            Hysteresis::None => -1,
+            _ => RetentionBranch::from_code(init_kappa).code(),
+        }
+    }
 }

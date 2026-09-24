@@ -58,10 +58,19 @@ impl Simulation {
         let mut c_root_sum = vec![0.0; self.n_species()];
         let root = self.prj.root.clone();
         let ns = self.n_species();
+
+        // Node 0 is skipped matching SINK.FOR loop do i = 2, N
+        self.sink[0] = 0.0;
+
         for i_step in 1..=n_step {
             for i in 1..n {
+                let dxm = if i == n - 1 {
+                    (self.x[i] - self.x[i - 1]) / 2.0
+                } else {
+                    (self.x[i + 1] - self.x[i - 1]) / 2.0
+                };
+
                 if self.beta[i] > 0.0 {
-                    let dxm = if i == n - 1 { (self.x[i] - self.x[i - 1]) / 2.0 } else { (self.x[i + 1] - self.x[i - 1]) / 2.0 };
                     let m = self.mat[i];
                     let mut h_red = self.h_new[i];
                     let mut s_alfa = 1.0;
@@ -83,20 +92,19 @@ impl Simulation {
                         }
                         RootStress::SShaped { p50, exponent } => (1.0 / (1.0 + (h_red / p50).powf(*exponent)), 10.0 * p50),
                     };
-                    let compen;
+
                     if i_step != n_step {
                         omega += alfa * s_alfa * self.beta[i] * dxm;
                         continue;
-                    } else {
-                        let mut c = 1.0;
-                        if omega < self.omega_c && omega > 0.0 {
-                            c = self.omega_c;
-                        }
-                        if omega >= self.omega_c {
-                            c = omega;
-                        }
-                        compen = c;
                     }
+
+                    let mut compen = 1.0;
+                    if omega < self.omega_c && omega > 0.0 {
+                        compen = self.omega_c;
+                    } else if omega >= self.omega_c {
+                        compen = omega;
+                    }
+
                     self.sink[i] = alfa * s_alfa * self.beta[i] * t_pot / compen;
                     if self.th_new[i] - 0.00025 < self.par_d[m][0] {
                         self.sink[i] = 0.0;
@@ -112,6 +120,7 @@ impl Simulation {
                 } else {
                     self.sink[i] = 0.0;
                 }
+
                 if self.beta[i] < 0.0 {
                     // Eddy Woehling's modification: source term at the bottom
                     let m = self.mat[i];
@@ -120,6 +129,7 @@ impl Simulation {
                 }
             }
         }
+
         if a_root > 0.001 {
             self.h_root /= a_root;
             self.set_c_root(&c_root_sum, a_root);

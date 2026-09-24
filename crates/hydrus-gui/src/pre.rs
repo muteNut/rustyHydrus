@@ -17,6 +17,7 @@ enum TopKind {
     VarFlux,
     VarHeadFlux,
 }
+
 #[derive(PartialEq, Clone, Copy)]
 enum BotKind {
     ConstHead,
@@ -48,6 +49,7 @@ fn top_kind(b: &WaterBc) -> TopKind {
         TopKind::ConstFlux
     }
 }
+
 fn set_top_kind(b: &mut WaterBc, k: TopKind) {
     let (atm, tv, sl, kod) = match k {
         TopKind::ConstHead => (false, false, false, 1),
@@ -63,6 +65,7 @@ fn set_top_kind(b: &mut WaterBc, k: TopKind) {
     b.surface_layer = sl;
     b.kod_top = kod;
 }
+
 fn bot_kind(b: &WaterBc) -> BotKind {
     if b.drains.is_some() {
         BotKind::Drains
@@ -84,6 +87,7 @@ fn bot_kind(b: &WaterBc) -> BotKind {
         BotKind::ConstFlux
     }
 }
+
 fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
     b.free_drainage = false;
     b.gwl_flux = false;
@@ -95,32 +99,32 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
         BotKind::ConstFlux => b.kod_bot = -1,
         BotKind::VarHead => {
             b.bot_time_variable = true;
-            b.kod_bot = 1
+            b.kod_bot = 1;
         }
         BotKind::VarFlux => {
             b.bot_time_variable = true;
-            b.kod_bot = -1
+            b.kod_bot = -1;
         }
         BotKind::Free => {
             b.free_drainage = true;
-            b.kod_bot = -1
+            b.kod_bot = -1;
         }
         BotKind::Gwl => {
             b.gwl_flux = true;
-            b.kod_bot = -1
+            b.kod_bot = -1;
         }
         BotKind::Seep => {
             b.seepage_face = true;
-            b.kod_bot = -1
+            b.kod_bot = -1;
         }
         BotKind::Drains => {
             b.drains = Some(DrainSettings::default());
-            b.kod_bot = -1
+            b.kod_bot = -1;
         }
     }
 }
 
-	impl App {
+impl App {
     /// Keep all per-material / per-species vectors consistent with the project.
     pub fn sync(&mut self) {
         let nm = self.prj.water.materials.len();
@@ -205,6 +209,7 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
         ui.label(RichText::new("Changing units does not convert existing parameter values.").weak());
         section(ui, "Processes");
         check(ui, ch, &mut self.prj.processes.water_flow, "Water flow (uncheck for transport under steady flow from the initial condition)");
+        check(ui, ch, &mut self.prj.processes.vapor, "Vapor flow (coupled non-isothermal liquid & water vapor flow)");
         check(ui, ch, &mut self.prj.processes.root_water_uptake, "Root water uptake");
         check(ui, ch, &mut self.prj.processes.root_growth, "Root growth");
         check(ui, ch, &mut self.prj.processes.heat, "Heat transport");
@@ -226,7 +231,7 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
             });
         }
         check(ui, ch, &mut self.prj.processes.short_output, "Short output: write time-level information only at print times");
-		let mut has_meteo = self.prj.atmosphere.meteo.is_some();
+        let mut has_meteo = self.prj.atmosphere.meteo.is_some();
         if ui.checkbox(&mut has_meteo, "Meteorological ET (Penman-Monteith / Hargreaves)").changed() {
             self.prj.atmosphere.meteo = if has_meteo {
                 Some(MeteoSettings::default())
@@ -236,8 +241,8 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
             *ch = true;
         }
         self.sync();
-        section(ui, "Not (yet) supported from the original code");
-		ui.label("Virus & colloid transport, Lenhard hysteresis, temperature/water-content dependent reaction rates, inverse (parameter estimation) module.");
+        section(ui, "Modules in Development");
+        ui.label("Lenhard hysteresis, inverse (parameter estimation) optimization, and major ion chemistry (UnsatChem).");
     }
 
     pub fn page_geometry(&mut self, ui: &mut Ui, ch: &mut bool) {
@@ -350,10 +355,18 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
                     row.col(|ui| dv(ui, ch, &mut nd.temp));
                 }
                 for j in 0..ns {
-                    row.col(|ui| dv(ui, ch, &mut nd.conc[j]));
+                    if let Some(c) = nd.conc.get_mut(j) {
+                        row.col(|ui| dv(ui, ch, c));
+                    } else {
+                        row.col(|ui| { ui.label("0.0"); });
+                    }
                 }
                 for j in 0..ns {
-                    row.col(|ui| dv(ui, ch, &mut nd.sorb[j]));
+                    if let Some(s) = nd.sorb.get_mut(j) {
+                        row.col(|ui| dv(ui, ch, s));
+                    } else {
+                        row.col(|ui| { ui.label("0.0"); });
+                    }
                 }
             });
         });
@@ -472,7 +485,16 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
                     *ch = true;
                 }
             });
-            let obs: Vec<String> = self.prj.profile.observation_nodes.iter().map(|&k| format!("{} ({:.1} {})", k, self.prj.profile.nodes[k - 1].depth, len)).collect();
+            let obs: Vec<String> = self.prj.profile.observation_nodes
+                .iter()
+                .filter_map(|&k| {
+                    if k >= 1 && k <= self.prj.profile.nodes.len() {
+                        Some(format!("{} ({:.1} {})", k, self.prj.profile.nodes[k - 1].depth, len))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             ui.label(format!("Observation nodes: {}", if obs.is_empty() { "none".into() } else { obs.join(", ") }));
             section(ui, "Nodal density");
             ui.label("Element length is proportional to the density (a small value = fine mesh). Fixed points: depth, density at top, density at bottom.");
@@ -628,6 +650,16 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
                 }
             });
         });
+        if self.prj.water.model == SoilModel::Tabular {
+            ui.horizontal(|ui| {
+                let status = if self.prj.water.tabs.is_some() {
+                    RichText::new("✔ External tables (Mater.in) loaded").color(egui::Color32::LIGHT_GREEN)
+                } else {
+                    RichText::new("⚠ No external tables loaded (Mater.in required)").color(egui::Color32::LIGHT_RED)
+                };
+                ui.label(status);
+            });
+        }
         ui.horizontal(|ui| {
             ui.label("Hysteresis");
             let cur = match self.prj.water.hysteresis {
@@ -669,7 +701,6 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
         let model = p.water.model;
         let lu = p.units.length_str();
 
-        // If external table is active, plot directly from the table points
         if model == SoilModel::Tabular {
             if let Some(ref tabs) = p.water.tabs {
                 if let Some(tb) = tabs.get(mi) {
@@ -762,7 +793,9 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
             field(ui, ch, "Ks – saturated hydraulic conductivity", &mut m.ks);
             field(ui, ch, "l – pore connectivity", &mut m.l);
             for (k, lab) in model.extra_labels().iter().enumerate() {
-                field(ui, ch, lab, &mut m.extra[k]);
+                if k < m.extra.len() {
+                    field(ui, ch, lab, &mut m.extra[k]);
+                }
             }
             if hyst {
                 field(ui, ch, "θm (drying)", &mut m.qm);
@@ -839,7 +872,10 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
                 });
             }
             BotKind::Seep => {
-                egui::Grid::new("seep").show(ui, |ui| field_u(ui, ch, "Pressure head at the seepage face", &mut bc.h_seep, &lu));
+                egui::Grid::new("seep").show(ui, |ui| {
+                    field_u(ui, ch, "Pressure head at the seepage face", &mut bc.h_seep, &lu);
+                });
+                ui.label(RichText::new("Dynamic switching between zero flux (unsaturated) and Dirichlet head (saturated).").weak());
             }
             BotKind::Drains => {
                 if let Some(d) = bc.drains.as_mut() {
@@ -934,6 +970,18 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
         ui.horizontal(|ui| {
             check(ui, ch, &mut self.prj.atmosphere.daily_variation, "Daily sinusoidal variation of evaporation/transpiration");
             check(ui, ch, &mut self.prj.atmosphere.sinusoidal_precip, "Sinusoidal precipitation within each interval");
+        });
+        ui.horizontal(|ui| {
+            check(ui, ch, &mut self.prj.atmosphere.snow, "Snow accumulation and melt");
+            if self.prj.atmosphere.snow {
+                ui.label("Snow melt factor:");
+                dv(ui, ch, &mut self.prj.atmosphere.snow_mf);
+            }
+            check(ui, ch, &mut self.prj.atmosphere.interception, "Canopy interception");
+            if self.prj.atmosphere.interception {
+                ui.label("Interception a:");
+                dv(ui, ch, &mut self.prj.atmosphere.interception_a);
+            }
         });
         ui.horizontal(|ui| {
             if ui.button("➕ Add record").clicked() {
@@ -1035,7 +1083,6 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
 
         let tu = self.prj.units.time_str().to_string();
 
-        // ---------------- Top Mode Selection Group ----------------
         section(ui, "Radiation & Cloudiness Input Options");
         ui.columns(2, |cols| {
             cols[0].group(|ui| {
@@ -1061,7 +1108,6 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
             check(ui, ch, &mut mp.hargreaves, "Use Hargreaves equation instead of Penman-Monteith");
         });
 
-        // ---------------- Geographical & Radiation Parameters ----------------
         section(ui, "Geographical & Radiation Parameters");
         egui::Grid::new("meteo_geo").num_columns(4).striped(true).show(ui, |ui| {
             ui.label("Latitude (° N+, S-)");
@@ -1103,7 +1149,6 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
             ui.end_row();
         });
 
-        // ---------------- Crop & Surface Parameters ----------------
         section(ui, "Crop & Surface Parameters");
         ui.horizontal(|ui| {
             ui.label("Crop mode:");
@@ -1136,7 +1181,6 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
             });
         }
 
-        // ---------------- Meteorological Records Table ----------------
         section(ui, "Meteorological Records");
         ui.horizontal(|ui| {
             if ui.button("➕ Add record").clicked() {
@@ -1148,7 +1192,7 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
                     rh_mean: 50.0,
                     wind_kmd: 150.0,
                     sun_hours: 8.0,
-					..Default::default()
+                    ..Default::default()
                 });
                 r.t += 1.0;
                 mp.records.push(r);
@@ -1356,6 +1400,27 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
         }
         check(ui, ch, &mut s.equil_init, "Non-equilibrium phase initially in equilibrium with the liquid phase");
         check(ui, ch, &mut s.mass_init, "Initial conditions given as total solute mass (per volume of soil)");
+        check(ui, ch, &mut s.l_moist, "Water content dependent reaction rates (Walker / exponential)");
+        check(ui, ch, &mut self.prj.root.l_act_rsu, "Active root solute uptake (Michaelis-Menten kinetics)");
+
+        if self.prj.root.l_act_rsu {
+            ui.indent("act_rsu", |ui| {
+                ui.label("Active solute uptake parameters (OmegaAct, Km, cMin):");
+                let ns = self.prj.solute.species.len();
+                while self.prj.root.omega_act.len() < ns { self.prj.root.omega_act.push(1.0); }
+                while self.prj.root.r_km.len() < ns { self.prj.root.r_km.push(0.5); }
+                while self.prj.root.c_min.len() < ns { self.prj.root.c_min.push(0.0); }
+                for j in 0..ns {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Solute {}:", j + 1));
+                        ui.add(egui::DragValue::new(&mut self.prj.root.omega_act[j]).speed(0.05).prefix("ω_act: "));
+                        ui.add(egui::DragValue::new(&mut self.prj.root.r_km[j]).speed(0.05).prefix("Km: "));
+                        ui.add(egui::DragValue::new(&mut self.prj.root.c_min[j]).speed(0.01).prefix("cMin: "));
+                    });
+                }
+            });
+        }
+        
         let l = self.prj.solute.species.len();
         section(ui, "Solutes");
         for i in 0..l {
@@ -1523,6 +1588,9 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
         if p.processes.water_flow {
             pr.push("water flow");
         }
+        if p.processes.vapor {
+            pr.push("water vapor flow");
+        }
         if p.processes.root_water_uptake {
             pr.push("root water uptake");
         }
@@ -1531,6 +1599,9 @@ fn set_bot_kind(b: &mut WaterBc, k: BotKind) {
         }
         if p.processes.heat {
             pr.push("heat transport");
+        }
+        if p.atmosphere.meteo.is_some() {
+            pr.push("meteorological ET");
         }
         ui.label(format!("Processes: {}", pr.join(", ")));
         if ui.button("Go to hydraulic model page").clicked() {

@@ -30,7 +30,7 @@ fn cloudiness(
     long_wave_b: f64,
     long_wave_a: f64,
     rad: f64,
-    ra: f64,
+    rad_cs: f64, // clear-sky radiation: Ra*(as + bs)
     ac: f64,
     bc: f64,
 ) -> f64 {
@@ -47,8 +47,9 @@ fn cloudiness(
             long_wave_b + long_wave_a * (1.0 - cover)
         }
         _ => {
-            if ra > 0.0 {
-                (ac * (rad / ra) + bc).clamp(0.0, 1.0)
+            // iSunSh = 3: cloudiness from measured solar radiation (Eq. 57), no clamp
+            if rad_cs > 0.0 {
+                ac * rad / rad_cs + bc
             } else {
                 long_wave_b
             }
@@ -190,17 +191,17 @@ pub fn potential_et(mp: &MeteoSettings, rec: &MeteoRecord, t_conv: f64) -> (f64,
                 (mp.cloud_fact_ac * rec.rad / rad_csh + mp.cloud_fact_bc).max(0.01)
             }
         } else {
-            cloudiness(
-                mp.i_sun_sh,
-                rec.sun_hours,
-                omega,
-                mp.long_wave_b,
-                mp.long_wave_a,
-                rec.rad,
-                ra,
-                mp.cloud_fact_ac,
-                mp.cloud_fact_bc,
-            )
+			cloudiness(
+				mp.i_sun_sh,
+				rec.sun_hours,
+				omega,
+				mp.long_wave_b,
+				mp.long_wave_a,
+				rec.rad,
+				ra * (mp.short_wave_a + mp.short_wave_b),
+				mp.cloud_fact_ac,
+				mp.cloud_fact_bc,
+			)
         };
 
         let rad = if mp.i_radiation == 0 {

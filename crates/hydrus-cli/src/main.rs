@@ -1,4 +1,5 @@
 use hydrus_core::{Simulation, StepStatus};
+use std::io::Write;
 use std::path::PathBuf;
 
 fn usage() -> ! {
@@ -42,9 +43,11 @@ fn main() {
     let mut last = -1.0;
     let status = sim.run(|s| {
         if !quiet {
-            let pct = 100.0 * (s.t - s.t_init) / (s.t_max - s.t_init);
-            if pct - last >= 5.0 {
-                eprint!("\r{:5.1}%  t = {:.5}  dt = {:.3e}", pct, s.t, s.dt);
+            let span = (s.t_max - s.t_init).max(1e-12);
+            let pct = 100.0 * (s.t - s.t_init) / span;
+            if pct - last >= 5.0 || s.t >= s.t_max {
+                eprint!("\r{:5.1}%  t = {:.5}  dt = {:.3e}", pct.min(100.0), s.t, s.dt);
+                let _ = std::io::stderr().flush();
                 last = pct;
             }
         }

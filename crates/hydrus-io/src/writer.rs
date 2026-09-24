@@ -35,16 +35,26 @@ pub fn tlevel_csv(r: &Results) -> String {
 }
 
 pub fn profiles_csv(r: &Results) -> String {
-    let mut s = String::from("time,node,depth,head,theta,K,C,flux,sink,kappa,v_over_Ks,temp");
+    let mut s = String::from("time,node,depth,head,theta,K,C,flux,sink,kappa,v_over_Ks,temp,h_matrix,th_matrix");
     for j in 0..r.n_solutes {
-        let _ = write!(s, ",conc{0},sorb{0}", j + 1);
+        let _ = write!(s, ",conc{0},sorb{0},conc_matrix{0},flux_conc{0}", j + 1);
     }
     s.push('\n');
     for p in &r.profiles {
         for n in &p.nodes {
-            let _ = write!(s, "{},{},{},{},{},{},{},{},{},{},{},{}", p.t, n.node, n.depth, n.h, n.theta, n.k, n.c, n.flux, n.sink, n.kappa, n.v_over_ks, n.temp);
+            let h_m_str = n.h_matrix.map(|v| v.to_string()).unwrap_or_default();
+            let th_m_str = n.th_matrix.map(|v| v.to_string()).unwrap_or_default();
+            let _ = write!(
+                s,
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                p.t, n.node, n.depth, n.h, n.theta, n.k, n.c, n.flux, n.sink, n.kappa, n.v_over_ks, n.temp, h_m_str, th_m_str
+            );
             for j in 0..r.n_solutes {
-                let _ = write!(s, ",{},{}", n.conc.get(j).copied().unwrap_or(0.0), n.sorb.get(j).copied().unwrap_or(0.0));
+                let c_val = n.conc.get(j).copied().unwrap_or(0.0);
+                let s_val = n.sorb.get(j).copied().unwrap_or(0.0);
+                let cm_val = n.conc_matrix.as_ref().and_then(|m| m.get(j)).map(|v| v.to_string()).unwrap_or_default();
+                let fc_val = n.flux_conc.as_ref().and_then(|f| f.get(j)).map(|v| v.to_string()).unwrap_or_default();
+                let _ = write!(s, ",{},{},{},{}", c_val, s_val, cm_val, fc_val);
             }
             s.push('\n');
         }
@@ -53,16 +63,21 @@ pub fn profiles_csv(r: &Results) -> String {
 }
 
 pub fn obs_csv(r: &Results) -> String {
-    let mut s = String::from("time,node,head,theta,temp,flux");
+    let mut s = String::from("time,node,head,theta,temp,flux,h_matrix,th_matrix");
     for j in 0..r.n_solutes {
-        let _ = write!(s, ",conc{}", j + 1);
+        let _ = write!(s, ",conc{0},conc_matrix{0},flux_conc{0}", j + 1);
     }
     s.push('\n');
     for o in &r.obs {
         for p in &o.points {
-            let _ = write!(s, "{},{},{},{},{},{}", o.t, p.node, p.h, p.theta, p.temp, p.flux);
+            let h_m_str = p.h_matrix.map(|v| v.to_string()).unwrap_or_default();
+            let th_m_str = p.th_matrix.map(|v| v.to_string()).unwrap_or_default();
+            let _ = write!(s, "{},{},{},{},{},{},{},{}", o.t, p.node, p.h, p.theta, p.temp, p.flux, h_m_str, th_m_str);
             for j in 0..r.n_solutes {
-                let _ = write!(s, ",{}", p.conc.get(j).copied().unwrap_or(0.0));
+                let c_val = p.conc.get(j).copied().unwrap_or(0.0);
+                let cm_val = p.conc_matrix.as_ref().and_then(|m| m.get(j)).map(|v| v.to_string()).unwrap_or_default();
+                let fc_val = p.flux_conc.as_ref().and_then(|f| f.get(j)).map(|v| v.to_string()).unwrap_or_default();
+                let _ = write!(s, ",{},{},{}", c_val, cm_val, fc_val);
             }
             s.push('\n');
         }

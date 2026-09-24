@@ -384,6 +384,7 @@ fn test_dual_permeability_matrix_fracture_solute_transfer() {
     assert!(c_matrix > 0.0, "Matrix domain must absorb solute mass, got {}", c_matrix);
     assert!(c_fracture < 10.0, "Fracture domain must lose solute mass into matrix, got {}", c_fracture);
 }
+
 #[test]
 fn test_colloid_pore_size_exclusion_and_velocity_acceleration() {
     let mut prj = Project::default();

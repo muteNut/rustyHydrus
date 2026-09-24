@@ -52,8 +52,17 @@ impl Simulation {
         }
 
         self.prec = rec.prec;
+        let mut r_r = rec.transp;
         self.r_soil = rec.evap;
-        let rr = rec.transp;
+        if self.prj.atmosphere.lai_partitioning && self.prj.atmosphere.meteo.is_none() {
+            let r_lai = r_r;
+            let r_pet = self.r_soil;
+            r_r = 0.0;
+            if r_lai > 0.0 {
+                r_r = r_pet * (1.0 - (-self.prj.atmosphere.extinction.max(0.1) * r_lai).exp()).max(0.0);
+            }
+            self.r_soil = r_pet - r_r;
+        }
         let hca = rec.h_crit_a;
         if self.prj.atmosphere.has_root_depth {
             self.x_root = rec.x_root;
@@ -101,7 +110,7 @@ impl Simulation {
                     let (p_eff, s_layer, evap_eff, min_st) = crate::meteo::calculate_snow(
                         self.prec,
                         temp_air,
-                        self.dt,
+                        self.t_atm1 - self.t_atm_old,
                         self.prj.atmosphere.snow_mf,
                         self.snow_layer,
                         self.r_soil,
@@ -212,7 +221,7 @@ impl Simulation {
                 self.h_top = rec.h_top;
             }
             if self.prj.atmosphere.meteo.is_none() {
-                self.r_root = rr.abs();
+                self.r_root = r_r.abs();
             }
         }
 		
