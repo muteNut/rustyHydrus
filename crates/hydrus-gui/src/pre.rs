@@ -288,8 +288,9 @@ impl App {
             }
         });
         for (i, m) in self.prj.water.materials.iter_mut().enumerate() {
+            let col = soil_color_for_name(&m.name, i + 1);
             ui.horizontal(|ui| {
-                ui.colored_label(mat_color(i + 1), "■");
+                ui.colored_label(col, "■");
                 ui.label(format!("{}:", i + 1));
                 if ui.text_edit_singleline(&mut m.name).changed() {
                     *ch = true;
@@ -373,190 +374,401 @@ impl App {
     }
 
     pub fn page_profile(&mut self, ui: &mut Ui, ch: &mut bool) {
-        ui.heading("Soil profile editor");
+        ui.heading("Soil profile & materials");
         self.sync();
         let len = self.prj.units.length_str();
-        ui.columns(2, |cols| {
-            let ui = &mut cols[0];
-            section(ui, "Edit a depth range");
-            let depth = self.prj.profile.depth();
-            if self.edit.to <= self.edit.from {
-                self.edit.to = depth;
-            }
-            egui::Grid::new("edit").num_columns(2).show(ui, |ui| {
-                ui.label("From depth");
-                ui.add(egui::DragValue::new(&mut self.edit.from).speed(0.5).suffix(format!(" {}", len)));
-                ui.end_row();
-                ui.label("To depth");
-                ui.add(egui::DragValue::new(&mut self.edit.to).speed(0.5).suffix(format!(" {}", len)));
-                ui.end_row();
-                ui.label("Material");
-                ui.add(egui::DragValue::new(&mut self.edit.mat).range(1..=self.prj.water.materials.len()));
-                ui.end_row();
-            });
-            let (from, to) = (self.edit.from, self.edit.to);
-            let sel = |d: f64| d >= from - 1e-9 && d <= to + 1e-9;
-            ui.horizontal(|ui| {
-                if ui.button("Assign material").clicked() {
-                    for n in self.prj.profile.nodes.iter_mut().filter(|n| sel(n.depth)) {
-                        n.mat = self.edit.mat;
-                        n.layer = self.edit.mat;
+
+        ui.horizontal_top(|ui| {
+            let total_w = ui.available_width();
+            let left_w = (total_w * 0.48).max(440.0);
+
+            // ---- Left Column: Geometry, Materials & Form Controls ----
+            ui.allocate_ui_with_layout(
+                egui::vec2(left_w, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_max_width(left_w);
+
+                    // 1. Column Geometry
+                    section(ui, "Profile geometry");
+                    egui::Grid::new("geo").num_columns(2).show(ui, |ui| {
+                        let mut depth = self.prj.profile.depth();
+                        ui.label("Profile depth");
+                        if ui.add(egui::DragValue::new(&mut depth).speed(1.0).suffix(format!(" {}", len))).changed() && depth > 0.0 {
+                            let n = self.prj.profile.nodes.len();
+                            self.prj.regrid_uniform(depth, n);
+                            self.edit.to = depth;
+                            *ch = true;
+                        }
+                        ui.end_row();
+
+                        ui.label("Number of nodes");
+                        let mut n = self.prj.profile.nodes.len();
+                        if ui.add(egui::DragValue::new(&mut n).range(3..=1001)).changed() {
+                            let d = self.prj.profile.depth();
+                            self.prj.regrid_uniform(d, n);
+                            self.edit.n_nodes = n;
+                            *ch = true;
+                        }
+                        ui.end_row();
+
+                        field(ui, ch, "Flow angle cos α (1 = vertical)", &mut self.prj.cos_alpha);
+                    });
+
+                    // 2. Soil Materials Manager
+                    section(ui, "Soil materials");
+                    ui.horizontal(|ui| {
+                        if ui.button("➕ Add material").clicked() {
+                            let mut m = self.prj.water.materials.last().cloned().unwrap_or_default();
+                            m.name = format!("Material {}", self.prj.water.materials.len() + 1);
+                            self.prj.water.materials.push(m);
+                            self.sync();
+                            *ch = true;
+                        }
+                        if ui.add_enabled(self.prj.water.materials.len() > 1, egui::Button::new("➖ Remove last")).clicked() {
+                            self.prj.water.materials.pop();
+                            let nm = self.prj.water.materials.len();
+                            self.prj.solute.materials.truncate(nm);
+                            self.prj.heat.materials.truncate(nm);
+                            for s in self.prj.solute.species.iter_mut() {
+                                s.per_material.truncate(nm);
+                            }
+                            self.sync();
+                            *ch = true;
+                        }
+                    });
+
+                    for (i, m) in self.prj.water.materials.iter_mut().enumerate() {
+                        let col = soil_color_for_name(&m.name, i + 1);
+                        ui.horizontal(|ui| {
+                            ui.colored_label(col, "■");
+                            ui.label(format!("{}:", i + 1));
+                            if ui.text_edit_singleline(&mut m.name).changed() {
+                                *ch = true;
+                            }
+                        });
                     }
-                    *ch = true;
-                }
-            });
+
+                    // 3. Edit Depth Range & Assign Materials
+                    section(ui, "Assign to depth range");
+                    let depth = self.prj.profile.depth();
+                    if self.edit.to <= self.edit.from {
+                        self.edit.to = depth;
+                    }
+                    egui::Grid::new("edit").num_columns(2).show(ui, |ui| {
+                        ui.label("From depth");
+                        ui.add(egui::DragValue::new(&mut self.edit.from).speed(0.5).suffix(format!(" {}", len)));
+                        ui.end_row();
+
+                        ui.label("To depth");
+                        ui.add(egui::DragValue::new(&mut self.edit.to).speed(0.5).suffix(format!(" {}", len)));
+                        ui.end_row();
+
+                        ui.label("Material");
+                        let cur_m = self.edit.mat.clamp(1, self.prj.water.materials.len());
+                        let cur_name = &self.prj.water.materials[cur_m - 1].name;
+                        ComboBox::from_id_salt("prof_mat_dd")
+                            .selected_text(format!("{}: {}", cur_m, cur_name))
+                            .show_ui(ui, |ui| {
+                                for (m_idx, mat) in self.prj.water.materials.iter().enumerate() {
+                                    let label = format!("{}: {}", m_idx + 1, mat.name);
+                                    let col = soil_mat_color(&self.prj, m_idx + 1);
+                                    ui.horizontal(|ui| {
+                                        ui.colored_label(col, "■");
+                                        if ui.selectable_value(&mut self.edit.mat, m_idx + 1, label).changed() {
+                                            *ch = true;
+                                        }
+                                    });
+                                }
+                            });
+                        ui.end_row();
+                    });
+
+                    let (from, to) = (self.edit.from, self.edit.to);
+                    let sel = |d: f64| d >= from - 1e-9 && d <= to + 1e-9;
+                    ui.horizontal(|ui| {
+                        if ui.button("Assign material").clicked() {
+                            for n in self.prj.profile.nodes.iter_mut().filter(|n| sel(n.depth)) {
+                                n.mat = self.edit.mat;
+                                n.layer = self.edit.mat;
+                            }
+                            *ch = true;
+                        }
+                    });
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(if self.prj.water.init_in_water_content { "θ top" } else { "h top" });
+                        ui.add(egui::DragValue::new(&mut self.edit.h_top).speed(1.0));
+                        ui.label(if self.prj.water.init_in_water_content { "θ bottom" } else { "h bottom" });
+                        ui.add(egui::DragValue::new(&mut self.edit.h_bot).speed(1.0));
+                        if ui.button("Set initial condition (linear)").clicked() {
+                            let (a, b) = (from, to);
+                            for n in self.prj.profile.nodes.iter_mut().filter(|n| n.depth >= a - 1e-9 && n.depth <= b + 1e-9) {
+                                let f = if b > a { (n.depth - a) / (b - a) } else { 0.0 };
+                                n.h = self.edit.h_top + (self.edit.h_bot - self.edit.h_top) * f;
+                            }
+                            *ch = true;
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Root uptake weight b");
+                        ui.add(egui::DragValue::new(&mut self.edit.beta).speed(0.01));
+                        if ui.button("Set").clicked() {
+                            for n in self.prj.profile.nodes.iter_mut().filter(|n| sel(n.depth)) {
+                                n.beta = self.edit.beta;
+                            }
+                            *ch = true;
+                        }
+                    });
+
+                    if self.prj.processes.heat {
+                        ui.horizontal(|ui| {
+                            ui.label("Temperature");
+                            ui.add(egui::DragValue::new(&mut self.edit.temp).speed(0.5));
+                            if ui.button("Set").clicked() {
+                                for n in self.prj.profile.nodes.iter_mut().filter(|n| sel(n.depth)) {
+                                    n.temp = self.edit.temp;
+                                }
+                                *ch = true;
+                            }
+                        });
+                    }
+
+                    if self.prj.processes.solute {
+                        ui.horizontal(|ui| {
+                            ui.label("Concentration (solute");
+                            ui.add(egui::DragValue::new(&mut self.edit.view).range(1..=self.prj.solute.species.len().max(1)));
+                            ui.label(")");
+                            ui.add(egui::DragValue::new(&mut self.edit.conc).speed(0.1));
+                            if ui.button("Set").clicked() {
+                                let j = self.edit.view.max(1) - 1;
+                                for n in self.prj.profile.nodes.iter_mut().filter(|n| sel(n.depth)) {
+                                    if j < n.conc.len() {
+                                        n.conc[j] = self.edit.conc;
+                                    }
+                                }
+                                *ch = true;
+                            }
+                        });
+                    }
+
+                    check(ui, ch, &mut self.prj.water.init_in_water_content, "Initial condition given as water content θ");
+
+                    // 4. Observation Nodes
+                    section(ui, "Observation nodes");
+                    ui.horizontal(|ui| {
+                        ui.label("Depth");
+                        ui.add(egui::DragValue::new(&mut self.edit.obs_depth).speed(0.5).suffix(format!(" {}", len)));
+                        if ui.button("Add nearest node").clicked() {
+                            let mut best = 1;
+                            let mut bd = f64::MAX;
+                            for (i, n) in self.prj.profile.nodes.iter().enumerate() {
+                                let d = (n.depth - self.edit.obs_depth).abs();
+                                if d < bd {
+                                    bd = d;
+                                    best = i + 1;
+                                }
+                            }
+                            if !self.prj.profile.observation_nodes.contains(&best) && self.prj.profile.observation_nodes.len() < 100 {
+                                self.prj.profile.observation_nodes.push(best);
+                                self.prj.profile.observation_nodes.sort();
+                                *ch = true;
+                            }
+                        }
+                        if ui.button("Clear").clicked() {
+                            self.prj.profile.observation_nodes.clear();
+                            *ch = true;
+                        }
+                    });
+
+                    let obs: Vec<String> = self.prj.profile.observation_nodes
+                        .iter()
+                        .filter_map(|&k| {
+                            if k >= 1 && k <= self.prj.profile.nodes.len() {
+                                Some(format!("{} ({:.1} {})", k, self.prj.profile.nodes[k - 1].depth, len))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    ui.label(format!("Observation nodes: {}", if obs.is_empty() { "none".into() } else { obs.join(", ") }));
+
+                    // 5. Nodal Density & Regridding
+                    section(ui, "Nodal density");
+                    ui.label("Element length is proportional to density. Fixed points: depth, top density, bot density.");
+                    let mut remove = None;
+                    for (i, f) in self.edit.fixed.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut f.0).speed(0.5).prefix("z "));
+                            ui.add(egui::DragValue::new(&mut f.1).speed(0.05).prefix("top "));
+                            ui.add(egui::DragValue::new(&mut f.2).speed(0.05).prefix("bot "));
+                            if ui.small_button("✖").clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove {
+                        self.edit.fixed.remove(i);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Add fixed point").clicked() {
+                            self.edit.fixed.push((depth, 1.0, 1.0));
+                        }
+                        ui.add(egui::DragValue::new(&mut self.edit.n_nodes).range(3..=1001).prefix("nodes "));
+                        if ui.button("Generate mesh").clicked() {
+                            let z = generate_nodes(depth, self.edit.n_nodes, &self.edit.fixed);
+                            let old = self.prj.profile.nodes.clone();
+                            let mut nodes = vec![];
+                            for &zz in &z {
+                                let mut best = old[0].clone();
+                                let mut bd = f64::MAX;
+                                for o in &old {
+                                    let d = (o.depth - zz).abs();
+                                    if d < bd {
+                                        bd = d;
+                                        best = o.clone();
+                                    }
+                                }
+                                best.depth = zz;
+                                nodes.push(best);
+                            }
+                            self.prj.profile.nodes = nodes;
+                            self.prj.profile.observation_nodes.clear();
+                            *ch = true;
+                        }
+                    });
+                },
+            );
+
+            ui.add_space(16.0);
             ui.separator();
-            ui.horizontal(|ui| {
-                ui.label(if self.prj.water.init_in_water_content { "θ top" } else { "h top" });
-                ui.add(egui::DragValue::new(&mut self.edit.h_top).speed(1.0));
-                ui.label(if self.prj.water.init_in_water_content { "θ bottom" } else { "h bottom" });
-                ui.add(egui::DragValue::new(&mut self.edit.h_bot).speed(1.0));
-                if ui.button("Set initial condition (linear)").clicked() {
-                    let (a, b) = (from, to);
-                    for n in self.prj.profile.nodes.iter_mut().filter(|n| n.depth >= a - 1e-9 && n.depth <= b + 1e-9) {
-                        let f = if b > a { (n.depth - a) / (b - a) } else { 0.0 };
-                        n.h = self.edit.h_top + (self.edit.h_bot - self.edit.h_top) * f;
-                    }
-                    *ch = true;
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Root uptake weight b");
-                ui.add(egui::DragValue::new(&mut self.edit.beta).speed(0.01));
-                if ui.button("Set").clicked() {
-                    for n in self.prj.profile.nodes.iter_mut().filter(|n| sel(n.depth)) {
-                        n.beta = self.edit.beta;
-                    }
-                    *ch = true;
-                }
-            });
-            if self.prj.processes.heat {
-                ui.horizontal(|ui| {
-                    ui.label("Temperature");
-                    ui.add(egui::DragValue::new(&mut self.edit.temp).speed(0.5));
-                    if ui.button("Set").clicked() {
-                        for n in self.prj.profile.nodes.iter_mut().filter(|n| sel(n.depth)) {
-                            n.temp = self.edit.temp;
+            ui.add_space(16.0);
+
+            // ---- Right Column: Plots & Strata ----
+            ui.vertical(|ui| {
+                let plot_w = ui.available_width().clamp(340.0, 720.0);
+                let nodes = &self.prj.profile.nodes;
+
+                // 1. Initial State Plot
+                let series: Vec<(&str, Vec<[f64; 2]>, egui::Color32)> = vec![
+                    ("initial h / θ", nodes.iter().map(|n| [n.h, -n.depth]).collect(), PALETTE[0]),
+                ];
+                Plot::new("prof_init")
+                    .width(plot_w)
+                    .height(210.0)
+                    .x_axis_label("initial pressure head / water content")
+                    .y_axis_label(format!("depth ({})", len))
+                    .legend(egui_plot::Legend::default())
+                    .show(ui, |pu| {
+                        for (name, pts, c) in series {
+                            pu.line(Line::new(PlotPoints::from(pts)).name(name).color(c));
                         }
-                        *ch = true;
+                    });
+
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Soil Strata Horizon").strong());
+
+                // 2. Earth Stratum Horizon Plot
+                struct Stratum {
+                    mat_idx: usize,
+                    z_top: f64, // positive depth downward
+                    z_bot: f64,
+                }
+                let mut strata: Vec<Stratum> = vec![];
+                if !nodes.is_empty() {
+                    let mut cur_mat = nodes[0].mat;
+                    let mut z_top = nodes[0].depth;
+                    for i in 1..nodes.len() {
+                        let d = nodes[i].depth;
+                        if nodes[i].mat != cur_mat {
+                            strata.push(Stratum { mat_idx: cur_mat.saturating_sub(1), z_top, z_bot: d });
+                            cur_mat = nodes[i].mat;
+                            z_top = d;
+                        }
                     }
-                });
-            }
-            if self.prj.processes.solute {
-                ui.horizontal(|ui| {
-                    ui.label("Concentration (solute");
-                    ui.add(egui::DragValue::new(&mut self.edit.view).range(1..=self.prj.solute.species.len().max(1)));
-                    ui.label(")");
-                    ui.add(egui::DragValue::new(&mut self.edit.conc).speed(0.1));
-                    if ui.button("Set").clicked() {
-                        let j = self.edit.view.max(1) - 1;
-                        for n in self.prj.profile.nodes.iter_mut().filter(|n| sel(n.depth)) {
-                            if j < n.conc.len() {
-                                n.conc[j] = self.edit.conc;
+                    if let Some(last) = nodes.last() {
+                        strata.push(Stratum { mat_idx: cur_mat.saturating_sub(1), z_top, z_bot: last.depth });
+                    }
+                }
+
+                let mut hovered_coord: Option<egui_plot::PlotPoint> = None;
+
+                let plot_resp = Plot::new("prof_strata")
+                    .width(plot_w)
+                    .height(180.0)
+                    .show_x(false)
+                    .show_axes([false, true])
+                    .y_axis_label(format!("depth ({})", len))
+                    .include_x(0.0)
+                    .include_x(1.0)
+                    .allow_zoom(false)
+                    .allow_drag(false)
+                    .legend(egui_plot::Legend::default())
+                    .show(ui, |pu| {
+                        // Capture pointer coordinates in plot-space
+                        hovered_coord = pu.pointer_coordinate();
+
+                        for s in &strata {
+                            let base_col = soil_mat_color(&self.prj, s.mat_idx + 1);
+							let col = egui::Color32::from_rgba_unmultiplied(base_col.r(), base_col.g(), base_col.b(), 140);
+                            let name = self.prj.water.materials.get(s.mat_idx)
+                                .map(|m| m.name.clone())
+                                .unwrap_or_else(|| format!("Material {}", s.mat_idx + 1));
+
+                            let is_selected = (self.edit.from - s.z_top).abs() < 1e-4 
+                                && (self.edit.to - s.z_bot).abs() < 1e-4;
+                            let stroke_width = if is_selected { 2.5_f32 } else { 1.0_f32 };
+                            let stroke_col = if is_selected {
+                                egui::Color32::WHITE
+                            } else {
+                                col.linear_multiply(0.7_f32)
+                            };
+
+                            let poly = egui_plot::Polygon::new(PlotPoints::new(vec![
+                                [0.0, -s.z_top],
+                                [1.0, -s.z_top],
+                                [1.0, -s.z_bot],
+                                [0.0, -s.z_bot],
+                            ]))
+                            .fill_color(col)
+                            .stroke(egui::Stroke::new(stroke_width, stroke_col))
+                            .name(name);
+
+                            pu.polygon(poly);
+                        }
+                    });
+
+                // Detect click from the plot response and update edit fields
+                if plot_resp.response.clicked() {
+                    if let Some(pos) = hovered_coord {
+                        let depth_clicked = -pos.y;
+                        for s in &strata {
+                            let min_z = s.z_top.min(s.z_bot);
+                            let max_z = s.z_top.max(s.z_bot);
+                            if depth_clicked >= min_z && depth_clicked <= max_z {
+                                self.edit.from = min_z;
+                                self.edit.to = max_z;
+                                self.edit.mat = s.mat_idx + 1;
+                                break;
                             }
                         }
-                        *ch = true;
-                    }
-                });
-            }
-            check(ui, ch, &mut self.prj.water.init_in_water_content, "Initial condition given as water content θ");
-            section(ui, "Observation nodes");
-            ui.horizontal(|ui| {
-                ui.label("Depth");
-                ui.add(egui::DragValue::new(&mut self.edit.obs_depth).speed(0.5).suffix(format!(" {}", len)));
-                if ui.button("Add nearest node").clicked() {
-                    let mut best = 1;
-                    let mut bd = f64::MAX;
-                    for (i, n) in self.prj.profile.nodes.iter().enumerate() {
-                        let d = (n.depth - self.edit.obs_depth).abs();
-                        if d < bd {
-                            bd = d;
-                            best = i + 1;
-                        }
-                    }
-                    if !self.prj.profile.observation_nodes.contains(&best) && self.prj.profile.observation_nodes.len() < 100 {
-                        self.prj.profile.observation_nodes.push(best);
-                        self.prj.profile.observation_nodes.sort();
-                        *ch = true;
                     }
                 }
-                if ui.button("Clear").clicked() {
-                    self.prj.profile.observation_nodes.clear();
-                    *ch = true;
-                }
-            });
-            let obs: Vec<String> = self.prj.profile.observation_nodes
-                .iter()
-                .filter_map(|&k| {
-                    if k >= 1 && k <= self.prj.profile.nodes.len() {
-                        Some(format!("{} ({:.1} {})", k, self.prj.profile.nodes[k - 1].depth, len))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            ui.label(format!("Observation nodes: {}", if obs.is_empty() { "none".into() } else { obs.join(", ") }));
-            section(ui, "Nodal density");
-            ui.label("Element length is proportional to the density (a small value = fine mesh). Fixed points: depth, density at top, density at bottom.");
-            let mut remove = None;
-            for (i, f) in self.edit.fixed.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut f.0).speed(0.5).prefix("z "));
-                    ui.add(egui::DragValue::new(&mut f.1).speed(0.05).prefix("top "));
-                    ui.add(egui::DragValue::new(&mut f.2).speed(0.05).prefix("bot "));
-                    if ui.small_button("✖").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                self.edit.fixed.remove(i);
-            }
-            ui.horizontal(|ui| {
-                if ui.button("Add fixed point").clicked() {
-                    self.edit.fixed.push((depth, 1.0, 1.0));
-                }
-                ui.add(egui::DragValue::new(&mut self.edit.n_nodes).range(3..=1001).prefix("nodes "));
-                if ui.button("Generate mesh").clicked() {
-                    let z = generate_nodes(depth, self.edit.n_nodes, &self.edit.fixed);
-                    let old = self.prj.profile.nodes.clone();
-                    let mut nodes = vec![];
-                    for &zz in &z {
-                        let mut best = old[0].clone();
-                        let mut bd = f64::MAX;
-                        for o in &old {
-                            let d = (o.depth - zz).abs();
-                            if d < bd {
-                                bd = d;
-                                best = o.clone();
-                            }
-                        }
-                        best.depth = zz;
-                        nodes.push(best);
-                    }
-                    self.prj.profile.nodes = nodes;
-                    self.prj.profile.observation_nodes.clear();
-                    *ch = true;
-                }
-            });
-            // ---- plots
-            let ui = &mut cols[1];
-            let nodes = &self.prj.profile.nodes;
-            let series: Vec<(&str, Vec<[f64; 2]>, egui::Color32)> = vec![
-                ("initial h / θ", nodes.iter().map(|n| [n.h, -n.depth]).collect(), PALETTE[0]),
-            ];
-            Plot::new("prof_init").height(260.0).x_axis_label("initial pressure head / water content").y_axis_label(format!("depth ({})", len)).legend(egui_plot::Legend::default()).show(ui, |pu| {
-                for (name, pts, c) in series {
-                    pu.line(Line::new(PlotPoints::from(pts)).name(name).color(c));
-                }
-            });
-            Plot::new("prof_mat").height(200.0).x_axis_label("material number").y_axis_label(format!("depth ({})", len)).show(ui, |pu| {
-                let pts: Vec<[f64; 2]> = nodes.iter().map(|n| [n.mat as f64, -n.depth]).collect();
-                pu.line(Line::new(PlotPoints::from(pts)).color(PALETTE[1]));
-            });
-            Plot::new("prof_beta").height(200.0).x_axis_label("root distribution b(x) (unnormalised)").y_axis_label(format!("depth ({})", len)).show(ui, |pu| {
-                let pts: Vec<[f64; 2]> = nodes.iter().map(|n| [n.beta, -n.depth]).collect();
-                pu.line(Line::new(PlotPoints::from(pts)).color(PALETTE[2]));
+
+                ui.add_space(8.0);
+
+                // 3. Root Uptake Distribution Plot
+                Plot::new("prof_beta")
+                    .width(plot_w)
+                    .height(170.0)
+                    .x_axis_label("root distribution b(x)")
+                    .y_axis_label(format!("depth ({})", len))
+                    .show(ui, |pu| {
+                        let pts: Vec<[f64; 2]> = nodes.iter().map(|n| [n.beta, -n.depth]).collect();
+                        pu.line(Line::new(PlotPoints::from(pts)).color(PALETTE[2]));
+                    });
             });
         });
     }
@@ -754,7 +966,8 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             for i in 0..nm {
                 let sel = self.sel_mat == i;
-                if ui.selectable_label(sel, RichText::new(format!("{} {}", i + 1, self.prj.water.materials[i].name)).color(mat_color(i + 1))).clicked() {
+                let col = soil_mat_color(&self.prj, i + 1);
+                if ui.selectable_label(sel, RichText::new(format!("{} {}", i + 1, self.prj.water.materials[i].name)).color(col)).clicked() {
                     self.sel_mat = i;
                 }
             }
@@ -774,6 +987,7 @@ impl App {
         });
         egui::Grid::new("soilp").num_columns(2).show(ui, |ui| {
             let m = &mut self.prj.water.materials[i];
+
             field(ui, ch, "θr – residual water content", &mut m.qr);
             field(ui, ch, "θs – saturated water content", &mut m.qs);
             match model {

@@ -220,7 +220,6 @@ pub struct SoilMaterial {
     pub n: f64,
     pub ks: f64,
     pub l: f64,
-    /// Modified VG: [Qm, Qa, Qk, Kk]; Durner: [w2, alpha2, n2]; Dual-porosity: [thr_im, ths_im, omega, alpha_im, ks_im]
     pub extra: [f64; 5],
     pub qm: f64,
     pub qs_w: f64,

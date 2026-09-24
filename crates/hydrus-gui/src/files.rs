@@ -36,6 +36,8 @@ pub struct FileDialog {
     dir_text: String,
     entries: Vec<(String, bool)>,
     err: String,
+    new_folder_name: String,
+    show_new_folder: bool,
 }
 
 pub fn home_dir() -> PathBuf {
@@ -58,6 +60,8 @@ impl FileDialog {
             ext: ext.iter().map(|s| s.to_string()).collect(),
             entries: vec![],
             err: String::new(),
+            new_folder_name: String::new(),
+            show_new_folder: false,
         };
         d.refresh();
         d
@@ -118,6 +122,9 @@ impl FileDialog {
                     if ui.button("🏠 Home").clicked() {
                         nav = Some(home_dir());
                     }
+                    if ui.button("📁+ New").clicked() {
+                        self.show_new_folder = !self.show_new_folder;
+                    }
                     #[cfg(windows)]
                     {
                         for c in b'C'..=b'H' {
@@ -135,6 +142,25 @@ impl FileDialog {
                         }
                     }
                 });
+
+                // --- NEW FOLDER ROW GOES HERE ---
+                if self.show_new_folder {
+                    ui.horizontal(|ui| {
+                        ui.label("Folder name:");
+                        ui.add(egui::TextEdit::singleline(&mut self.new_folder_name).desired_width(180.0));
+                        if ui.button("Create").clicked() && !self.new_folder_name.trim().is_empty() {
+                            let p = self.dir.join(self.new_folder_name.trim());
+                            if let Err(e) = std::fs::create_dir_all(&p) {
+                                self.err = e.to_string();
+                            } else {
+                                self.new_folder_name.clear();
+                                self.show_new_folder = false;
+                                self.refresh();
+                            }
+                        }
+                    });
+                }
+
                 ui.separator();
                 ScrollArea::vertical().max_height(300.0).auto_shrink([false, false]).show(ui, |ui| {
                     for (name, is_dir) in self.entries.clone() {

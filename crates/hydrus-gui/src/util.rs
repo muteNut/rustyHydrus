@@ -1,21 +1,49 @@
 use egui::{Color32, DragValue, Ui};
 use hydrus_core::{LengthUnit, Project, SoilMaterial, TimeUnit};
 
+/// Canonical 10-color categorical palette (sRGB). Single source of truth in GUI.
 pub const PALETTE: [Color32; 10] = [
-    Color32::from_rgb(31, 119, 180),
-    Color32::from_rgb(255, 127, 14),
-    Color32::from_rgb(44, 160, 44),
-    Color32::from_rgb(214, 39, 40),
-    Color32::from_rgb(148, 103, 189),
-    Color32::from_rgb(140, 86, 75),
-    Color32::from_rgb(227, 119, 194),
-    Color32::from_rgb(127, 127, 127),
-    Color32::from_rgb(188, 189, 34),
-    Color32::from_rgb(23, 190, 207),
+    Color32::from_rgb(31, 119, 180),  // 0: Blue (Loam)
+    Color32::from_rgb(255, 127, 14),  // 1: Orange (Sand)
+    Color32::from_rgb(44, 160, 44),   // 2: Green
+    Color32::from_rgb(214, 39, 40),   // 3: Red
+    Color32::from_rgb(148, 103, 189), // 4: Purple
+    Color32::from_rgb(140, 86, 75),   // 5: Brown
+    Color32::from_rgb(227, 119, 194), // 6: Pink
+    Color32::from_rgb(127, 127, 127), // 7: Gray
+    Color32::from_rgb(188, 189, 34),  // 8: Olive
+    Color32::from_rgb(23, 190, 207),  // 9: Cyan
 ];
 
+/// Returns the color for a material index (1-based).
 pub fn mat_color(m: usize) -> Color32 {
     PALETTE[(m.max(1) - 1) % PALETTE.len()]
+}
+
+/// Returns color based on class name, falling back to 1-based index cycling.
+pub fn soil_color_for_name(name: &str, m_1based: usize) -> Color32 {
+    let name_lower = name.trim().to_lowercase();
+    if name_lower == "sand" {
+        PALETTE[1] // Orange
+    } else if name_lower == "loam" {
+        PALETTE[0] // Blue
+    } else if name_lower.contains("clay") {
+        PALETTE[3] // Red
+    } else if name_lower.contains("silt") {
+        PALETTE[5] // Brown
+    } else {
+        mat_color(m_1based)
+    }
+}
+
+/// Dynamic material color resolver from project and 1-based material index.
+pub fn soil_mat_color(prj: &Project, m_1based: usize) -> Color32 {
+    let idx = m_1based.saturating_sub(1);
+    if let Some(mat) = prj.water.materials.get(idx) {
+        soil_color_for_name(&mat.name, m_1based)
+    } else {
+        mat_color(m_1based)
+    }
 }
 
 /// USDA soil textural classes, Carsel & Parrish (1988) as in the HYDRUS soil catalog (cm, day).
@@ -42,6 +70,7 @@ pub fn cm_to_unit(p: &Project) -> f64 {
         LengthUnit::M => 0.01,
     }
 }
+
 /// Factor converting a time given in days to the project's time unit.
 pub fn day_to_unit(p: &Project) -> f64 {
     match p.units.time {
@@ -69,7 +98,6 @@ pub fn apply_catalog(m: &mut SoilMaterial, idx: usize, lf: f64, tf: f64) {
 
         // Reset extra parameters cleanly and configure defaults if ModifiedVG is active
         m.extra = [0.0; 5];
-        // For Modified VG compatibility: [Qm, Qa, Qk, Kk]
         m.extra[0] = m.qs;
         m.extra[1] = m.qr;
         m.extra[2] = m.qs;
@@ -85,7 +113,6 @@ pub fn log_space(a: f64, b: f64, n: usize) -> Vec<f64> {
 /// Fixed points (depth, density_top, density_bottom) -> node depths (top to bottom).
 /// Element length is proportional to the (linearly interpolated) density.
 pub fn generate_nodes(depth: f64, n: usize, fixed: &[(f64, f64, f64)]) -> Vec<f64> {
-    // density profile as piecewise-linear function of depth
     let mut pts: Vec<(f64, f64)> = vec![];
     let mut fp = fixed.to_vec();
     fp.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
@@ -135,7 +162,6 @@ pub fn generate_nodes(depth: f64, n: usize, fixed: &[(f64, f64, f64)]) -> Vec<f6
     while z.len() < n {
         z.push(depth);
     }
-    // rescale so that the last node is exactly at depth
     let last = *z.last().unwrap();
     if last > 0.0 {
         for v in z.iter_mut() {
